@@ -9,10 +9,13 @@
 #include <objectarray.h>
 #include <shobjidl.h>
 #include <propkey.h>
+#include <propsys.h>
 #include <propvarutil.h>
 #include <knownfolders.h>
 #include <shlobj.h>
 #include <tchar.h>
+
+#pragma comment (lib, "Propsys")
 
 #define EXIT_SUCCESS      (0)
 #define EXIT_FAILURE      (1)
@@ -34,6 +37,7 @@ struct CDL
   HWND   hwnd;
   DWORD  dwLaunchThreadId;
   ICustomDestinationList* picdl;
+  IObjectCollection* poc;
   UINT cMaxSlots;
 };
 
@@ -100,10 +104,17 @@ static FORCEINLINE HRESULT CALLBACK OnCreateJumpList(HWND hwnd, PCWSTR pszAppId)
 static FORCEINLINE HRESULT CALLBACK OnAddUserTask(HWND hwnd)
 {
     HRESULT hr;
-    IObjectCollection* poc;
     IShellLink* psl;
+    ICDL* icdl;
 
-    hr = CoCreateInstance(&CLSID_EnumerableObjectCollection, NULL, CLSCTX_INPROC_SERVER, &IID_IObjectCollection, &poc);
+    icdl = GetWindowLongPtr(hwnd, GWLP_USERDATA);
+
+    if (!icdl)
+    {
+      return E_FAIL;
+    }
+
+    hr = CoCreateInstance(&CLSID_EnumerableObjectCollection, NULL, CLSCTX_INPROC_SERVER, &IID_IObjectCollection, &icdl->poc);
   
     if (FAILED(hr))
     {
@@ -121,7 +132,67 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTask(HWND hwnd)
 }
 static FORCEINLINE HRESULT CALLBACK OnAddSeparator(HWND hwnd)
 {
-    return E_NOTIMPL;
+    HRESULT hr;
+    IShellLink* psl;
+    IPropertyStore* pps;
+    PROPVARIANT pv;
+    ICDL* icdl;
+    BOOL flag;
+
+    hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLink, &psl);
+
+    if (FAILED(hr))
+    {
+      return E_FAIL;
+    }
+
+    IPropertyStore_QueryInterface(psl, &IID_IPropertyStore, &pps);
+
+    if (!pps)
+    {
+      IShellLinkW_Release(psl);
+      return E_FAIL;
+    }
+
+    SecureZeroMemory(&pv, sizeof(pv));
+    flag = TRUE;
+    hr = InitVariantFromBooleanArray(&flag, 1, &pv);
+    if ( FAILED(hr) )
+    {
+      IShellLinkW_Release(psl);
+      return E_FAIL;
+    }
+
+    hr = IPropertyStore_SetValue(pps, &PKEY_AppUserModel_IsDestListSeparator, &pv);
+    PropVariantClear ( &pv );
+
+    if ( FAILED(hr) )
+    {
+      IShellLinkW_Release(psl);
+      return E_FAIL;
+    }
+
+    hr = IPropertyStore_Commit(pps);
+
+    if ( FAILED(hr) )
+    {
+      IShellLinkW_Release(psl);
+      return E_FAIL;
+    }
+
+    icdl = GetWindowLongPtr(hwnd, GWLP_USERDATA);
+
+    if (!icdl)
+    {
+      IShellLinkW_Release(psl);
+      return E_FAIL;
+    }
+
+    hr = IObjectCollection_AddObject(icdl->poc, psl);
+    hr = ICustomDestinationList_AddUserTasks(icdl->picdl, icdl->poc);
+    hr = ICustomDestinationList_CommitList(icdl->picdl);
+
+    return SUCCEEDED(hr);
 }
 
 static FORCEINLINE BOOL APIPRIVATE PumpMessages(void)
