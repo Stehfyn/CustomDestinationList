@@ -4,6 +4,7 @@
 #define WIN32_LEAN_AND_MEAN       // Exclude rarely-used stuff from Windows headers
 #define STRICT_TYPED_ITEMIDS      // Utilize strictly typed IDLists
 #define STRICT
+#define COBJMACROS
 #include <windows.h>
 
 #if defined _WINDLL
@@ -23,6 +24,8 @@
 #endif
 
 typedef struct CDL ICDL;
+typedef struct Task ITask;
 
 CDLAPI(HRESULT) ICDL_Initialize(ICDL** picdl);
-CDLAPI(HRESULT) ICDL_AddTask(ICDL* icdl);
+CDLAPI(HRESULT) ICDL_CreateJumpList(ICDL* icdl, PCWSTR pcszAppId);
+CDLAPI(HRESULT) ICDL_AddUserTasks(ICDL* icdl);

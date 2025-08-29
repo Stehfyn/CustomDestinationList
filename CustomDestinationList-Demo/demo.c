@@ -34,5 +34,8 @@ void _tmain(void)
       return EXIT_FAILURE;
     }
 
+    hr = ICDL_CreateJumpList(icdl, L"Yum");
+    hr = ICDL_AddUserTasks(icdl);
+
     SuspendThread(GetCurrentThread());
 }

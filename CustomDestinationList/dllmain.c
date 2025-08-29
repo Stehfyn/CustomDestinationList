@@ -19,16 +19,89 @@
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
+struct Task
+{
+  LPCTSTR szArgs;
+  LPCTSTR szDescription;
+  LPCTSTR szTitle;
+  int nIconIndex;
+};
+
 struct CDL
 {
   HANDLE hThread;
   DWORD  dwThreadId;
   HWND   hwnd;
+  DWORD  dwLaunchThreadId;
   ICustomDestinationList* picdl;
 };
 
 EXTERN_C TCHAR c_szClassName[]   = _T("CDLWndClass");
 EXTERN_C TCHAR c_szWindowTitle[] = _T("CDLWindow");
+
+#define WM_CREATEJUMPLIST (WM_USER + 0x0)
+#define WM_ADDUSERTASK    (WM_USER + 0x1)
+
+/* void Cls_OnExitSizeMove(HWND hwnd */
+#define HANDLE_WM_CREATEJUMPLIST(hwnd, wParam, lParam, fn) \
+        (LRESULT)((fn)((hwnd), (PCWSTR)(wParam)))
+
+#define HANDLE_WM_ADDUSERTASK(hwnd, wParam, lParam, fn) \
+        (LRESULT)((fn)((hwnd)))
+
+static FORCEINLINE HRESULT CALLBACK OnCreateJumpList(HWND hwnd, PCWSTR pszAppId)
+{
+    HRESULT hr;
+    ICDL* icdl;
+
+    icdl = GetWindowLongPtr(hwnd, GWLP_USERDATA);
+
+    if (!icdl)
+    {
+      return E_FAIL;
+    }
+
+    hr = CoCreateInstance(&CLSID_DestinationList, NULL, CLSCTX_INPROC_SERVER, &IID_ICustomDestinationList, &icdl->picdl);
+
+    if (FAILED(hr))
+    {
+      return hr;
+    }
+
+    hr = ICustomDestinationList_SetAppID(icdl->picdl, pszAppId);
+
+    if (FAILED(hr))
+    {
+      ICustomDestinationList_Release(icdl->picdl);
+
+      icdl->picdl = NULL;
+    }
+
+    return hr;
+}
+
+static FORCEINLINE HRESULT CALLBACK OnAddUserTask(HWND hwnd)
+{
+    HRESULT hr;
+    IObjectCollection* poc;
+    IShellLink* psl;
+
+    hr = CoCreateInstance(&CLSID_EnumerableObjectCollection, NULL, CLSCTX_INPROC_SERVER, &IID_IObjectCollection, &poc);
+  
+    if (FAILED(hr))
+    {
+      return hr;
+    }
+
+    hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLink, &psl);
+
+    if (FAILED(hr))
+    {
+      return hr;
+    }
+
+    return hr;
+}
 
 static FORCEINLINE BOOL APIPRIVATE PumpMessages(void)
 {
@@ -64,7 +137,9 @@ static FORCEINLINE BOOL CALLBACK OnNCCreate(HWND hwnd, LPCREATESTRUCT lpCreateSt
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     switch (uMsg) {
-    HANDLE_MSG(hwnd, WM_NCCREATE, OnNCCreate);
+    HANDLE_MSG(hwnd, WM_NCCREATE,       OnNCCreate);
+    HANDLE_MSG(hwnd, WM_CREATEJUMPLIST, OnCreateJumpList);
+    HANDLE_MSG(hwnd, WM_ADDUSERTASK,    OnAddUserTask);
     default:
       return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
@@ -110,23 +185,56 @@ static DWORD WINAPI CDLThread(LPVOID lpThreadParameter)
       return EXIT_FAILURE;
     }
 
+    PostThreadMessage(icdl->dwLaunchThreadId, 0, 0, 0);
+
     while (PumpMessages());
+
+    return EXIT_SUCCESS;
+}
+
+static void CreateThreadMessageQueue(void)
+{
+    MSG msg;
+    PostThreadMessage(GetCurrentThreadId(), 0, 0, 0);
+    GetMessage(&msg, 0, 0, 0);
+}
+
+static DWORD WINAPI CDLLaunch(LPVOID lpThreadParameter)
+{
+    ICDL* icdl;
+
+    icdl = (ICDL*)lpThreadParameter;
+    
+    icdl->hThread = CreateThread(0, 0, CDLThread, icdl, CREATE_SUSPENDED, &icdl->dwThreadId);
+
+    if (!icdl->hThread)
+    {
+      return EXIT_FAILURE;
+    }
+
+    CreateThreadMessageQueue();
+
+    ResumeThread(icdl->hThread);
+    
+    WaitMessage();
 
     return EXIT_SUCCESS;
 }
 
 static HRESULT APIPRIVATE Initialize(ICDL* icdl)
 {
-    icdl->hThread = CreateThread(0, 0, CDLThread, icdl, CREATE_SUSPENDED, &icdl->dwThreadId);
+    HANDLE hThread;
 
-    if (!icdl->hThread)
+    hThread = CreateThread(0, 0, CDLLaunch, icdl, CREATE_SUSPENDED, &icdl->dwLaunchThreadId);
+
+    if (!hThread)
     {
       return E_FAIL;
     }
 
-    ResumeThread(icdl->hThread);
+    ResumeThread(hThread);
 
-    return S_OK;
+    return (WAIT_OBJECT_0 == WaitForSingleObject(hThread, USER_TIMER_MINIMUM)) ? S_OK : E_FAIL;
 }
 
 CDLAPI(HRESULT) ICDL_Initialize(ICDL** picdl)
@@ -141,13 +249,14 @@ CDLAPI(HRESULT) ICDL_Initialize(ICDL** picdl)
   return Initialize((*picdl));
 }
 
-CDLAPI(HRESULT) ICDL_AddTask(ICDL* icdl)
+CDLAPI(HRESULT) ICDL_CreateJumpList(ICDL* icdl, PCWSTR pcszAppId)
 {
-  HRESULT hr;
+  return (HRESULT)SendMessage(icdl->hwnd, WM_CREATEJUMPLIST, pcszAppId, 0);
+}
 
-  hr = CoCreateInstance(&CLSID_DestinationList, NULL, CLSCTX_INPROC_SERVER, &IID_ICustomDestinationList, &icdl->picdl);
-
-  return hr;
+CDLAPI(HRESULT) ICDL_AddUserTasks(ICDL* icdl)
+{
+  return (HRESULT)SendMessage(icdl->hwnd, WM_ADDUSERTASK, 0, 0);
 }
 
 BOOL APIENTRY DllMain( HMODULE hModule,
