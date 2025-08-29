@@ -29,3 +29,4 @@ typedef struct Task ITask;
 CDLAPI(HRESULT) ICDL_Initialize(ICDL** picdl);
 CDLAPI(HRESULT) ICDL_CreateJumpList(ICDL* icdl, PCWSTR pcszAppId);
 CDLAPI(HRESULT) ICDL_AddUserTasks(ICDL* icdl);
+CDLAPI(HRESULT) ICDL_AddSeparator(ICDL* icdl);

@@ -34,6 +34,7 @@ struct CDL
   HWND   hwnd;
   DWORD  dwLaunchThreadId;
   ICustomDestinationList* picdl;
+  UINT cMaxSlots;
 };
 
 EXTERN_C TCHAR c_szClassName[]   = _T("CDLWndClass");
@@ -41,6 +42,7 @@ EXTERN_C TCHAR c_szWindowTitle[] = _T("CDLWindow");
 
 #define WM_CREATEJUMPLIST (WM_USER + 0x0)
 #define WM_ADDUSERTASK    (WM_USER + 0x1)
+#define WM_ADDSEPARATOR   (WM_USER + 0x2)
 
 /* void Cls_OnExitSizeMove(HWND hwnd */
 #define HANDLE_WM_CREATEJUMPLIST(hwnd, wParam, lParam, fn) \
@@ -49,10 +51,14 @@ EXTERN_C TCHAR c_szWindowTitle[] = _T("CDLWindow");
 #define HANDLE_WM_ADDUSERTASK(hwnd, wParam, lParam, fn) \
         (LRESULT)((fn)((hwnd)))
 
+#define HANDLE_WM_ADDSEPARATOR(hwnd, wParam, lParam, fn) \
+        (LRESULT)((fn)((hwnd)))
+
 static FORCEINLINE HRESULT CALLBACK OnCreateJumpList(HWND hwnd, PCWSTR pszAppId)
 {
     HRESULT hr;
     ICDL* icdl;
+    IObjectArray* pri;
 
     icdl = GetWindowLongPtr(hwnd, GWLP_USERDATA);
 
@@ -69,6 +75,17 @@ static FORCEINLINE HRESULT CALLBACK OnCreateJumpList(HWND hwnd, PCWSTR pszAppId)
     }
 
     hr = ICustomDestinationList_SetAppID(icdl->picdl, pszAppId);
+
+    if (FAILED(hr))
+    {
+      ICustomDestinationList_Release(icdl->picdl);
+
+      icdl->picdl = NULL;
+
+      return hr;
+    }
+
+    hr = ICustomDestinationList_BeginList(icdl->picdl, &icdl->cMaxSlots, &IID_IObjectArray, &pri);
 
     if (FAILED(hr))
     {
@@ -101,6 +118,10 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTask(HWND hwnd)
     }
 
     return hr;
+}
+static FORCEINLINE HRESULT CALLBACK OnAddSeparator(HWND hwnd)
+{
+    return E_NOTIMPL;
 }
 
 static FORCEINLINE BOOL APIPRIVATE PumpMessages(void)
@@ -140,6 +161,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     HANDLE_MSG(hwnd, WM_NCCREATE,       OnNCCreate);
     HANDLE_MSG(hwnd, WM_CREATEJUMPLIST, OnCreateJumpList);
     HANDLE_MSG(hwnd, WM_ADDUSERTASK,    OnAddUserTask);
+    HANDLE_MSG(hwnd, WM_ADDSEPARATOR,   OnAddSeparator);
     default:
       return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
@@ -257,6 +279,11 @@ CDLAPI(HRESULT) ICDL_CreateJumpList(ICDL* icdl, PCWSTR pcszAppId)
 CDLAPI(HRESULT) ICDL_AddUserTasks(ICDL* icdl)
 {
   return (HRESULT)SendMessage(icdl->hwnd, WM_ADDUSERTASK, 0, 0);
+}
+
+CDLAPI(HRESULT) ICDL_AddSeparator(ICDL* icdl)
+{
+  return (HRESULT)SendMessage(icdl->hwnd, WM_ADDSEPARATOR, 0, 0);
 }
 
 BOOL APIENTRY DllMain( HMODULE hModule,
