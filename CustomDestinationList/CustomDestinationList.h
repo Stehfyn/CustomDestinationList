@@ -1,11 +1,27 @@
 #pragma once
-
 #define NTDDI_VERSION NTDDI_WIN7  // Specifies that the minimum required platform is Windows 7.
 #define WIN32_LEAN_AND_MEAN       // Exclude rarely-used stuff from Windows headers
 #define STRICT_TYPED_ITEMIDS      // Utilize strictly typed IDLists
-#define STRICT
 #define COBJMACROS
+#define OEMRESOURCE
 #include <windows.h>
+#include <tchar.h>
+#include <shlobj.h>
+#include <shobjidl.h>
+
+#ifndef EXIT_SUCCESS
+  #define EXIT_SUCCESS      (0)
+#else
+  #undef EXIT_SUCCESS
+  #define EXIT_SUCCESS      (0)
+#endif
+
+#ifndef EXIT_FAILURE
+  #define EXIT_FAILURE      (1)
+#else
+  #undef EXIT_FAILURE
+  #define EXIT_FAILURE      (1)
+#endif
 
 #if defined _WINDLL
   #define CDLAPI(type) __declspec(dllexport) EXTERN_C type APIENTRY
@@ -26,7 +42,21 @@
 typedef struct CDL ICDL;
 typedef struct Task ITask;
 
-CDLAPI(HRESULT) ICDL_Initialize(ICDL** picdl);
+typedef struct ICDL_TASK_PARAMS
+{
+  LPCTSTR szArgs;
+  LPCTSTR szDescription;
+  LPCTSTR szTitle;
+  int nIconIndex;
+}ICDL_TASK_PARAMS;
+
+CDLAPI(HRESULT) ICDL_Initialize(ICDL** ppThis);
+
+CDLAPI(HRESULT) ICDL_CreateTaskList(ICDL* pThis, UINT elems, ITask** ppTasks);
+CDLAPI(HRESULT) ICDL_SetTask(ICDL* pThis, ITask* pTasks, UINT elem, const ICDL_TASK_PARAMS* params);
+
 CDLAPI(HRESULT) ICDL_CreateJumpList(ICDL* icdl, PCWSTR pcszAppId);
-CDLAPI(HRESULT) ICDL_AddUserTasks(ICDL* icdl);
-CDLAPI(HRESULT) ICDL_AddSeparator(ICDL* icdl);
+CDLAPI(HRESULT) ICDL_AddUserTasks(ICDL* pThis, ITask* pTasks, UINT elems);
+CDLAPI(HRESULT) ICDL_AddSeparator(ICDL* pThis);
+
+CDLAPI(HRESULT) ICDL_CommitJumpList(ICDL* pThis);

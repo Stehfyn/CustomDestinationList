@@ -39,97 +39,197 @@ struct CDL
   ICustomDestinationList* picdl;
   IObjectCollection* poc;
   UINT cMaxSlots;
+  TCHAR szImageName[MAX_PATH];
 };
 
 EXTERN_C TCHAR c_szClassName[]   = _T("CDLWndClass");
 EXTERN_C TCHAR c_szWindowTitle[] = _T("CDLWindow");
 
 #define WM_CREATEJUMPLIST (WM_USER + 0x0)
-#define WM_ADDUSERTASK    (WM_USER + 0x1)
+#define WM_ADDUSERTASKS   (WM_USER + 0x1)
 #define WM_ADDSEPARATOR   (WM_USER + 0x2)
+#define WM_COMMITJUMPLIST (WM_USER + 0x3)
 
-/* void Cls_OnExitSizeMove(HWND hwnd */
 #define HANDLE_WM_CREATEJUMPLIST(hwnd, wParam, lParam, fn) \
         (LRESULT)((fn)((hwnd), (PCWSTR)(wParam)))
 
-#define HANDLE_WM_ADDUSERTASK(hwnd, wParam, lParam, fn) \
-        (LRESULT)((fn)((hwnd)))
+#define HANDLE_WM_ADDUSERTASKS(hwnd, wParam, lParam, fn) \
+        (LRESULT)((fn)((hwnd), (ITask*)(wParam), (UINT)(lParam)))
 
 #define HANDLE_WM_ADDSEPARATOR(hwnd, wParam, lParam, fn) \
+        (LRESULT)((fn)((hwnd)))
+
+#define HANDLE_WM_COMMITJUMPLIST(hwnd, wParam, lParam, fn) \
         (LRESULT)((fn)((hwnd)))
 
 static FORCEINLINE HRESULT CALLBACK OnCreateJumpList(HWND hwnd, PCWSTR pszAppId)
 {
     HRESULT hr;
-    ICDL* icdl;
+    ICDL* pThis;
     IObjectArray* pri;
 
-    icdl = GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    pThis = GetWindowLongPtr(hwnd, GWLP_USERDATA);
 
-    if (!icdl)
+    if (!pThis)
     {
       return E_FAIL;
     }
 
-    hr = CoCreateInstance(&CLSID_DestinationList, NULL, CLSCTX_INPROC_SERVER, &IID_ICustomDestinationList, &icdl->picdl);
+    hr = CoCreateInstance(&CLSID_DestinationList, NULL, CLSCTX_INPROC_SERVER, &IID_ICustomDestinationList, &pThis->picdl);
 
     if (FAILED(hr))
     {
       return hr;
     }
 
-    hr = ICustomDestinationList_SetAppID(icdl->picdl, pszAppId);
+    hr = ICustomDestinationList_SetAppID(pThis->picdl, pszAppId);
 
     if (FAILED(hr))
     {
-      ICustomDestinationList_Release(icdl->picdl);
+      ICustomDestinationList_Release(pThis->picdl);
 
-      icdl->picdl = NULL;
+      pThis->picdl = NULL;
 
       return hr;
     }
 
-    hr = ICustomDestinationList_BeginList(icdl->picdl, &icdl->cMaxSlots, &IID_IObjectArray, &pri);
+    hr = ICustomDestinationList_BeginList(pThis->picdl, &pThis->cMaxSlots, &IID_IObjectArray, &pri);
 
     if (FAILED(hr))
     {
-      ICustomDestinationList_Release(icdl->picdl);
+      ICustomDestinationList_Release(pThis->picdl);
 
-      icdl->picdl = NULL;
+      pThis->picdl = NULL;
     }
 
-    return hr;
+    return CoCreateInstance(&CLSID_EnumerableObjectCollection, NULL, CLSCTX_INPROC_SERVER, &IID_IObjectCollection, &pThis->poc);
 }
 
-static FORCEINLINE HRESULT CALLBACK OnAddUserTask(HWND hwnd)
+static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UINT elems)
 {
-    HRESULT hr;
+    HRESULT  hr;
+    ICDL* pThis;
+    UINT elm;
     IShellLink* psl;
-    ICDL* icdl;
+    IPropertyStore* pps;
+    PROPVARIANT pv;
 
-    icdl = GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    pThis = GetWindowLongPtr(hwnd, GWLP_USERDATA);
 
-    if (!icdl)
+    if (!pThis)
     {
       return E_FAIL;
     }
 
-    hr = CoCreateInstance(&CLSID_EnumerableObjectCollection, NULL, CLSCTX_INPROC_SERVER, &IID_IObjectCollection, &icdl->poc);
-  
-    if (FAILED(hr))
+    for (elm = 0; elm < elems; ++elm)
     {
-      return hr;
+      const ITask* c_pTask = &pTasks[elm];
+
+      PCWSTR ppszTitle[] = { c_pTask->szTitle };
+
+      hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLink, &psl);
+
+      if (FAILED(hr))
+      {
+        return hr;
+      }
+
+      hr = IPropertyStore_QueryInterface(psl, &IID_IPropertyStore, &pps);
+
+      if (!pps)
+      {
+        IShellLinkW_Release(psl);
+
+        return hr;
+      }
+
+      hr = IShellLinkW_SetPath(psl, pThis->szImageName);
+
+      if (FAILED(hr))
+      {
+        IPropertyStore_Release(pps);
+        IShellLinkW_Release(psl);
+
+        return hr;
+      }
+
+      hr = IShellLinkW_SetArguments(psl, c_pTask->szArgs);
+
+      if (FAILED(hr))
+      {
+        IPropertyStore_Release(pps);
+        IShellLinkW_Release(psl);
+
+        return hr;
+      }
+
+      hr = IShellLinkW_SetIconLocation(psl, pThis->szImageName, c_pTask->nIconIndex);
+
+      if (FAILED(hr))
+      {
+        IPropertyStore_Release(pps);
+        IShellLinkW_Release(psl);
+
+        return hr;
+      }
+
+      hr = IShellLinkW_SetDescription(psl, c_pTask->szDescription);
+
+      if (FAILED(hr))
+      {
+        IPropertyStore_Release(pps);
+        IShellLinkW_Release(psl);
+
+        return hr;
+      }
+
+      SecureZeroMemory(&pv, sizeof(pv));
+      hr = InitVariantFromStringArray(ppszTitle, 1, &pv);
+
+      if (FAILED(hr))
+      {
+        IPropertyStore_Release(pps);
+        IShellLinkW_Release(psl);
+
+        return hr;
+      }
+
+      hr = IPropertyStore_SetValue(pps, &PKEY_Title, &pv);
+
+      PropVariantClear(&pv);
+
+      if (FAILED(hr))
+      {
+        IPropertyStore_Release(pps);
+        IShellLinkW_Release(psl);
+
+        return hr;
+      }
+
+      hr = IPropertyStore_Commit(pps);
+
+      if (FAILED(hr))
+      {
+        IPropertyStore_Release(pps);
+        IShellLinkW_Release(psl);
+
+        return hr;
+      }
+
+      hr = IObjectCollection_AddObject(pThis->poc, psl);
+
+      IPropertyStore_Release(pps);
+      IShellLinkW_Release(psl);
+
+      if (FAILED(hr))
+      {
+        return hr;
+      }
     }
 
-    hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLink, &psl);
-
-    if (FAILED(hr))
-    {
-      return hr;
-    }
-
-    return hr;
+    return S_OK;
 }
+
 static FORCEINLINE HRESULT CALLBACK OnAddSeparator(HWND hwnd)
 {
     HRESULT hr;
@@ -157,7 +257,7 @@ static FORCEINLINE HRESULT CALLBACK OnAddSeparator(HWND hwnd)
     SecureZeroMemory(&pv, sizeof(pv));
     flag = TRUE;
     hr = InitVariantFromBooleanArray(&flag, 1, &pv);
-    if ( FAILED(hr) )
+    if (FAILED(hr))
     {
       IShellLinkW_Release(psl);
       return E_FAIL;
@@ -195,15 +295,36 @@ static FORCEINLINE HRESULT CALLBACK OnAddSeparator(HWND hwnd)
     return SUCCEEDED(hr);
 }
 
+static FORCEINLINE HRESULT CALLBACK OnCommitJumpList(HWND hwnd)
+{
+    HRESULT  hr;
+    ICDL* pThis;
+
+    pThis = GetWindowLongPtr(hwnd, GWLP_USERDATA);
+
+    if (!pThis)
+    {
+      return E_FAIL;
+    }
+
+    hr = ICustomDestinationList_AddUserTasks(pThis->picdl, pThis->poc);
+
+    if (FAILED(hr))
+    {
+      return hr;
+    }
+
+    return ICustomDestinationList_CommitList(pThis->picdl);
+}
+
 static FORCEINLINE BOOL APIPRIVATE PumpMessages(void)
 {
     MSG  msg;
     BOOL fQuit = FALSE;
     SecureZeroMemory(&msg, sizeof(msg));
 
-    while (GetMessage(&msg, 0, 0, 0))
+    while (PeekMessage(&msg, 0, 0, 0, PM_REMOVE))
     {
-      TranslateMessage(&msg);
       DispatchMessage(&msg);
 
       fQuit |= (WM_QUIT == msg.message);
@@ -231,8 +352,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     switch (uMsg) {
     HANDLE_MSG(hwnd, WM_NCCREATE,       OnNCCreate);
     HANDLE_MSG(hwnd, WM_CREATEJUMPLIST, OnCreateJumpList);
-    HANDLE_MSG(hwnd, WM_ADDUSERTASK,    OnAddUserTask);
+    HANDLE_MSG(hwnd, WM_ADDUSERTASKS,   OnAddUserTasks);
     HANDLE_MSG(hwnd, WM_ADDSEPARATOR,   OnAddSeparator);
+    HANDLE_MSG(hwnd, WM_COMMITJUMPLIST, OnCommitJumpList);
     default:
       return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
@@ -297,7 +419,6 @@ static DWORD WINAPI CDLLaunch(LPVOID lpThreadParameter)
     ICDL* icdl;
 
     icdl = (ICDL*)lpThreadParameter;
-    
     icdl->hThread = CreateThread(0, 0, CDLThread, icdl, CREATE_SUSPENDED, &icdl->dwThreadId);
 
     if (!icdl->hThread)
@@ -314,11 +435,19 @@ static DWORD WINAPI CDLLaunch(LPVOID lpThreadParameter)
     return EXIT_SUCCESS;
 }
 
-static HRESULT APIPRIVATE Initialize(ICDL* icdl)
+static HRESULT APIPRIVATE Initialize(ICDL* pThis)
 {
     HANDLE hThread;
+    DWORD  cchImageName;
 
-    hThread = CreateThread(0, 0, CDLLaunch, icdl, CREATE_SUSPENDED, &icdl->dwLaunchThreadId);
+    cchImageName = _countof(pThis->szImageName);
+
+    if (!QueryFullProcessImageName(GetCurrentProcess(), 0, pThis->szImageName, &cchImageName))
+    {
+      return E_FAIL;
+    }
+
+    hThread = CreateThread(0, 0, CDLLaunch, pThis, CREATE_SUSPENDED, &pThis->dwLaunchThreadId);
 
     if (!hThread)
     {
@@ -327,34 +456,65 @@ static HRESULT APIPRIVATE Initialize(ICDL* icdl)
 
     ResumeThread(hThread);
 
-    return (WAIT_OBJECT_0 == WaitForSingleObject(hThread, USER_TIMER_MINIMUM)) ? S_OK : E_FAIL;
+    WaitForSingleObject(hThread, INFINITE);
+
+    return S_OK;
 }
 
-CDLAPI(HRESULT) ICDL_Initialize(ICDL** picdl)
+CDLAPI(HRESULT) ICDL_CreateTaskList(ICDL* pThis, UINT elems, ITask** ppTasks)
 {
-  (*picdl) = GlobalAlloc(GPTR, sizeof(ICDL));
+    (*ppTasks) = GlobalAlloc(GPTR, elems * sizeof(ITask));
 
-  if (!(*picdl))
+    if (!(*ppTasks))
+    {
+      return E_OUTOFMEMORY;
+    }
+
+    return S_OK;
+}
+
+CDLAPI(HRESULT) ICDL_SetTask(ICDL* pThis, ITask* pTasks, UINT elem, const ICDL_TASK_PARAMS* params)
+{
+    ITask* pTask = &pTasks[elem];
+
+    pTask->szArgs        = params->szArgs;
+    pTask->szDescription = params->szDescription;
+    pTask->szTitle       = params->szTitle;
+    pTask->nIconIndex    = params->nIconIndex;
+
+    return S_OK;
+}
+
+CDLAPI(HRESULT) ICDL_Initialize(ICDL** ppThis)
+{
+  (*ppThis) = GlobalAlloc(GPTR, sizeof(ICDL));
+
+  if (!(*ppThis))
   {
     return E_OUTOFMEMORY;
   }
 
-  return Initialize((*picdl));
+  return Initialize((*ppThis));
 }
 
-CDLAPI(HRESULT) ICDL_CreateJumpList(ICDL* icdl, PCWSTR pcszAppId)
+CDLAPI(HRESULT) ICDL_CreateJumpList(ICDL* pThis, PCWSTR pcszAppId)
 {
-  return (HRESULT)SendMessage(icdl->hwnd, WM_CREATEJUMPLIST, pcszAppId, 0);
+  return (HRESULT)SendMessage(pThis->hwnd, WM_CREATEJUMPLIST, pcszAppId, 0);
 }
 
-CDLAPI(HRESULT) ICDL_AddUserTasks(ICDL* icdl)
+CDLAPI(HRESULT) ICDL_AddUserTasks(ICDL* pThis, ITask* pTasks, UINT elems)
 {
-  return (HRESULT)SendMessage(icdl->hwnd, WM_ADDUSERTASK, 0, 0);
+  return (HRESULT)SendMessage(pThis->hwnd, WM_ADDUSERTASKS, pTasks, elems);
 }
 
-CDLAPI(HRESULT) ICDL_AddSeparator(ICDL* icdl)
+CDLAPI(HRESULT) ICDL_AddSeparator(ICDL* pThis)
 {
-  return (HRESULT)SendMessage(icdl->hwnd, WM_ADDSEPARATOR, 0, 0);
+  return (HRESULT)SendMessage(pThis->hwnd, WM_ADDSEPARATOR, 0, 0);
+}
+
+CDLAPI(HRESULT) ICDL_CommitJumpList(ICDL* pThis)
+{
+  return (HRESULT)SendMessage(pThis->hwnd, WM_COMMITJUMPLIST, 0, 0);
 }
 
 BOOL APIENTRY DllMain( HMODULE hModule,
@@ -365,6 +525,7 @@ BOOL APIENTRY DllMain( HMODULE hModule,
     switch (ul_reason_for_call)
     {
     case DLL_PROCESS_ATTACH:
+      DisableThreadLibraryCalls(hModule);
     case DLL_THREAD_ATTACH:
     case DLL_THREAD_DETACH:
     case DLL_PROCESS_DETACH:
