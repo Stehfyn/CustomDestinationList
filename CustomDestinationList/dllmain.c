@@ -1,49 +1,45 @@
 #include "CustomDestinationList.h"
 
-#include <windowsx.h>
-
-#include <psapi.h>
-#include <shlwapi.h>
-#include <strsafe.h>
-
+#include <oleauto.h>
 #include <objectarray.h>
-#include <shobjidl.h>
 #include <propkey.h>
 #include <propsys.h>
 #include <propvarutil.h>
-#include <knownfolders.h>
-#include <shlobj.h>
-#include <tchar.h>
 
 #pragma comment (lib, "Propsys")
 
 #define EXIT_SUCCESS      (0)
 #define EXIT_FAILURE      (1)
+#define PATHLEN           (256)
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
 struct Task
 {
-  LPCTSTR szArgs;
-  LPCTSTR szDescription;
-  LPCTSTR szTitle;
-  int nIconIndex;
+  LPCTSTR pszImage;
+  LPCTSTR pszArgs;
+  LPCTSTR pszDescription;
+  LPCTSTR pszTitle;
+  LONG_PTR nIconIndex;
 };
 
 struct CDL
 {
-  HANDLE hThread;
-  DWORD  dwThreadId;
-  HWND   hwnd;
-  DWORD  dwLaunchThreadId;
+  TCHAR szImageName[PATHLEN];
   ICustomDestinationList* picdl;
   IObjectCollection* poc;
-  UINT cMaxSlots;
-  TCHAR szImageName[MAX_PATH];
+  HWND   hwnd;
+  HANDLE hThread;
+  DWORD  dwThreadId;
+  DWORD  dwLaunchThreadId;
+  UINT_PTR cMaxSlots;
 };
 
 EXTERN_C TCHAR c_szClassName[]   = _T("CDLWndClass");
 EXTERN_C TCHAR c_szWindowTitle[] = _T("CDLWindow");
+
+#define GetInterfaceHandle(hwnd) \
+        ((ICDL*)GetWindowLongPtr(hwnd, GWLP_USERDATA))
 
 #define WM_CREATEJUMPLIST (WM_USER + 0x0)
 #define WM_ADDUSERTASKS   (WM_USER + 0x1)
@@ -54,7 +50,7 @@ EXTERN_C TCHAR c_szWindowTitle[] = _T("CDLWindow");
         (LRESULT)((fn)((hwnd), (PCWSTR)(wParam)))
 
 #define HANDLE_WM_ADDUSERTASKS(hwnd, wParam, lParam, fn) \
-        (LRESULT)((fn)((hwnd), (ITask*)(wParam), (UINT)(lParam)))
+        (LRESULT)((fn)((hwnd), (ITask*)(wParam), (UINT16)(HIWORD((lParam))), (UINT16)(LOWORD((lParam)))))
 
 #define HANDLE_WM_ADDSEPARATOR(hwnd, wParam, lParam, fn) \
         (LRESULT)((fn)((hwnd)))
@@ -68,17 +64,28 @@ static FORCEINLINE HRESULT CALLBACK OnCreateJumpList(HWND hwnd, PCWSTR pszAppId)
     ICDL* pThis;
     IObjectArray* pri;
 
-    pThis = GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    pThis = GetInterfaceHandle(hwnd);
 
     if (!pThis)
     {
       return E_FAIL;
     }
-
+    
     hr = CoCreateInstance(&CLSID_DestinationList, NULL, CLSCTX_INPROC_SERVER, &IID_ICustomDestinationList, &pThis->picdl);
 
     if (FAILED(hr))
     {
+      return hr;
+    }
+
+    hr = CoCreateInstance(&CLSID_EnumerableObjectCollection, NULL, CLSCTX_INPROC_SERVER, &IID_IObjectCollection, &pThis->poc);
+
+    if (FAILED(hr))
+    {
+      ICustomDestinationList_Release(pThis->picdl);
+
+      pThis->picdl = NULL;
+
       return hr;
     }
 
@@ -87,25 +94,27 @@ static FORCEINLINE HRESULT CALLBACK OnCreateJumpList(HWND hwnd, PCWSTR pszAppId)
     if (FAILED(hr))
     {
       ICustomDestinationList_Release(pThis->picdl);
+      IObjectCollection_Release(pThis->poc);
 
       pThis->picdl = NULL;
 
       return hr;
     }
-
-    hr = ICustomDestinationList_BeginList(pThis->picdl, &pThis->cMaxSlots, &IID_IObjectArray, &pri);
+    
+    hr = ICustomDestinationList_BeginList(pThis->picdl, (UINT*)&pThis->cMaxSlots, &IID_IObjectArray, &pri);
 
     if (FAILED(hr))
     {
       ICustomDestinationList_Release(pThis->picdl);
+      IObjectCollection_Release(pThis->poc);
 
       pThis->picdl = NULL;
     }
 
-    return CoCreateInstance(&CLSID_EnumerableObjectCollection, NULL, CLSCTX_INPROC_SERVER, &IID_IObjectCollection, &pThis->poc);
+    return hr;
 }
 
-static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UINT elems)
+static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UINT16 elems, UINT16 offset)
 {
     HRESULT  hr;
     ICDL* pThis;
@@ -113,8 +122,9 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UIN
     IShellLink* psl;
     IPropertyStore* pps;
     PROPVARIANT pv;
+    SIZE_T cbTitle;
 
-    pThis = GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    pThis = GetInterfaceHandle(hwnd);
 
     if (!pThis)
     {
@@ -123,9 +133,7 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UIN
 
     for (elm = 0; elm < elems; ++elm)
     {
-      const ITask* c_pTask = &pTasks[elm];
-
-      PCWSTR ppszTitle[] = { c_pTask->szTitle };
+      const ITask* c_pTask = &pTasks[elm + offset];
 
       hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLink, &psl);
 
@@ -153,7 +161,7 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UIN
         return hr;
       }
 
-      hr = IShellLinkW_SetArguments(psl, c_pTask->szArgs);
+      hr = IShellLinkW_SetArguments(psl, c_pTask->pszArgs);
 
       if (FAILED(hr))
       {
@@ -163,7 +171,7 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UIN
         return hr;
       }
 
-      hr = IShellLinkW_SetIconLocation(psl, pThis->szImageName, c_pTask->nIconIndex);
+      hr = IShellLinkW_SetIconLocation(psl, pThis->szImageName, (int)c_pTask->nIconIndex);
 
       if (FAILED(hr))
       {
@@ -173,7 +181,7 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UIN
         return hr;
       }
 
-      hr = IShellLinkW_SetDescription(psl, c_pTask->szDescription);
+      hr = IShellLinkW_SetDescription(psl, c_pTask->pszDescription);
 
       if (FAILED(hr))
       {
@@ -183,8 +191,10 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UIN
         return hr;
       }
 
-      SecureZeroMemory(&pv, sizeof(pv));
-      hr = InitVariantFromStringArray(ppszTitle, 1, &pv);
+      PropVariantInit(&pv);
+      cbTitle = (wcslen(c_pTask->pszTitle) + 1) * sizeof(TCHAR);
+      V_UNION(&pv, pwszVal) = CoTaskMemAlloc(cbTitle);
+      hr = V_UNION(&pv, pwszVal) ? S_OK : E_OUTOFMEMORY;
 
       if (FAILED(hr))
       {
@@ -194,9 +204,9 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UIN
         return hr;
       }
 
+      CopyMemory(V_UNION(&pv, pwszVal), c_pTask->pszTitle, cbTitle);
+      V_VT(&pv) = VT_LPWSTR;
       hr = IPropertyStore_SetValue(pps, &PKEY_Title, &pv);
-
-      PropVariantClear(&pv);
 
       if (FAILED(hr))
       {
@@ -207,6 +217,7 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UIN
       }
 
       hr = IPropertyStore_Commit(pps);
+      PropVariantClear(&pv);
 
       if (FAILED(hr))
       {
@@ -216,7 +227,7 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UIN
         return hr;
       }
 
-      hr = IObjectCollection_AddObject(pThis->poc, psl);
+      hr = IObjectCollection_AddObject(pThis->poc, (IUnknown*)psl);
 
       IPropertyStore_Release(pps);
       IShellLinkW_Release(psl);
@@ -236,85 +247,95 @@ static FORCEINLINE HRESULT CALLBACK OnAddSeparator(HWND hwnd)
     IShellLink* psl;
     IPropertyStore* pps;
     PROPVARIANT pv;
-    ICDL* icdl;
-    BOOL flag;
-
-    hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLink, &psl);
-
-    if (FAILED(hr))
-    {
-      return E_FAIL;
-    }
-
-    IPropertyStore_QueryInterface(psl, &IID_IPropertyStore, &pps);
-
-    if (!pps)
-    {
-      IShellLinkW_Release(psl);
-      return E_FAIL;
-    }
-
-    SecureZeroMemory(&pv, sizeof(pv));
-    flag = TRUE;
-    hr = InitVariantFromBooleanArray(&flag, 1, &pv);
-    if (FAILED(hr))
-    {
-      IShellLinkW_Release(psl);
-      return E_FAIL;
-    }
-
-    hr = IPropertyStore_SetValue(pps, &PKEY_AppUserModel_IsDestListSeparator, &pv);
-    PropVariantClear ( &pv );
-
-    if ( FAILED(hr) )
-    {
-      IShellLinkW_Release(psl);
-      return E_FAIL;
-    }
-
-    hr = IPropertyStore_Commit(pps);
-
-    if ( FAILED(hr) )
-    {
-      IShellLinkW_Release(psl);
-      return E_FAIL;
-    }
-
-    icdl = GetWindowLongPtr(hwnd, GWLP_USERDATA);
-
-    if (!icdl)
-    {
-      IShellLinkW_Release(psl);
-      return E_FAIL;
-    }
-
-    hr = IObjectCollection_AddObject(icdl->poc, psl);
-    hr = ICustomDestinationList_AddUserTasks(icdl->picdl, icdl->poc);
-    hr = ICustomDestinationList_CommitList(icdl->picdl);
-
-    return SUCCEEDED(hr);
-}
-
-static FORCEINLINE HRESULT CALLBACK OnCommitJumpList(HWND hwnd)
-{
-    HRESULT  hr;
     ICDL* pThis;
 
-    pThis = GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    pThis = GetInterfaceHandle(hwnd);
 
     if (!pThis)
     {
       return E_FAIL;
     }
 
-    hr = ICustomDestinationList_AddUserTasks(pThis->picdl, pThis->poc);
+    hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLink, &psl);
 
     if (FAILED(hr))
     {
       return hr;
     }
 
-    return ICustomDestinationList_CommitList(pThis->picdl);
+    hr = IPropertyStore_QueryInterface(psl, &IID_IPropertyStore, &pps);
+
+    if (!pps)
+    {
+      IShellLinkW_Release(psl);
+      return hr;
+    }
+
+    PropVariantInit(&pv);
+    V_VT(&pv) = VT_BOOL;
+    V_UNION(&pv, boolVal) = VARIANT_TRUE;
+    hr = IPropertyStore_SetValue(pps, &PKEY_AppUserModel_IsDestListSeparator, &pv);
+
+    if (FAILED(hr))
+    {
+      IShellLinkW_Release(psl);
+      return hr;
+    }
+
+    hr = IPropertyStore_Commit(pps);
+    PropVariantClear(&pv);
+
+    if (FAILED(hr))
+    {
+      IPropertyStore_Release(pps);
+      IShellLinkW_Release(psl);
+      return hr;
+    }
+
+    IPropertyStore_Release(pps);
+
+    hr = IObjectCollection_AddObject(pThis->poc, (IUnknown*)psl);
+
+    IShellLinkW_Release(psl);
+
+    return hr;
+}
+
+static FORCEINLINE HRESULT CALLBACK OnCommitJumpList(HWND hwnd)
+{
+    HRESULT  hr;
+    ICDL* pThis;
+    IObjectArray* poa;
+
+    pThis = GetInterfaceHandle(hwnd);
+
+    if (!pThis)
+    {
+      return E_FAIL;
+    }
+
+    hr = IObjectArray_QueryInterface(pThis->poc, &IID_IObjectArray, &poa);
+
+    if (FAILED(hr))
+    {
+      return hr;
+    }
+
+    hr = ICustomDestinationList_AddUserTasks(pThis->picdl, poa);
+
+    if (FAILED(hr))
+    {
+      IObjectArray_Release(poa);
+
+      return hr;
+    }
+
+    hr = ICustomDestinationList_CommitList(pThis->picdl);
+
+    IObjectArray_Release(poa);
+    IObjectCollection_Release(pThis->poc);
+
+    return hr;
 }
 
 static FORCEINLINE BOOL APIPRIVATE PumpMessages(void)
@@ -323,7 +344,7 @@ static FORCEINLINE BOOL APIPRIVATE PumpMessages(void)
     BOOL fQuit = FALSE;
     SecureZeroMemory(&msg, sizeof(msg));
 
-    while (PeekMessage(&msg, 0, 0, 0, PM_REMOVE))
+    while (0 < GetMessage(&msg, 0, 0, 0))
     {
       DispatchMessage(&msg);
 
@@ -355,29 +376,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     HANDLE_MSG(hwnd, WM_ADDUSERTASKS,   OnAddUserTasks);
     HANDLE_MSG(hwnd, WM_ADDSEPARATOR,   OnAddSeparator);
     HANDLE_MSG(hwnd, WM_COMMITJUMPLIST, OnCommitJumpList);
-    default:
-      return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
+    
+    return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
-static HWND APIPRIVATE CreateMessageWindow(LPARAM lpParam)
+static HWND APIPRIVATE CreateMessageWindow(ICDL* pThis)
 {
     WNDCLASS wc;
-    ATOM    atm;
 
     SecureZeroMemory(&wc, sizeof(wc));
     wc.lpfnWndProc   = WndProc;
-    wc.hInstance     = &__ImageBase;
+    wc.hInstance     = (HINSTANCE)&__ImageBase;
     wc.lpszClassName = c_szClassName;
-    
-    atm = RegisterClass(&wc);
 
-    if (!atm)
-    {
-      return NULL;
-    }
-
-    return CreateWindow(atm, c_szWindowTitle, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, &__ImageBase, lpParam);
+    return CreateWindow(MAKEINTATOM(RegisterClass(&wc)), c_szWindowTitle, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, (HINSTANCE)&__ImageBase, (LPVOID)pThis);
 }
 
 static DWORD WINAPI CDLThread(LPVOID lpThreadParameter)
@@ -385,7 +398,7 @@ static DWORD WINAPI CDLThread(LPVOID lpThreadParameter)
     HRESULT hr;
     ICDL* icdl;
 
-    hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
     if (!SUCCEEDED(hr))
     {
@@ -463,6 +476,8 @@ static HRESULT APIPRIVATE Initialize(ICDL* pThis)
 
 CDLAPI(HRESULT) ICDL_CreateTaskList(ICDL* pThis, UINT elems, ITask** ppTasks)
 {
+    UNREFERENCED_PARAMETER(pThis);
+
     (*ppTasks) = GlobalAlloc(GPTR, elems * sizeof(ITask));
 
     if (!(*ppTasks))
@@ -473,14 +488,17 @@ CDLAPI(HRESULT) ICDL_CreateTaskList(ICDL* pThis, UINT elems, ITask** ppTasks)
     return S_OK;
 }
 
-CDLAPI(HRESULT) ICDL_SetTask(ICDL* pThis, ITask* pTasks, UINT elem, const ICDL_TASK_PARAMS* params)
+CDLAPI(HRESULT) ICDL_SetTask(ICDL* pThis, ITask* pTasks, UINT elem, LPCTSTR pszImage, LPCTSTR pszArgs, LPCTSTR pszDescription, LPCTSTR pszTitle, int nIconIndex)
 {
     ITask* pTask = &pTasks[elem];
 
-    pTask->szArgs        = params->szArgs;
-    pTask->szDescription = params->szDescription;
-    pTask->szTitle       = params->szTitle;
-    pTask->nIconIndex    = params->nIconIndex;
+    UNREFERENCED_PARAMETER(pThis);
+
+    pTask->pszImage       = pszImage;
+    pTask->pszArgs        = pszArgs;
+    pTask->pszDescription = pszDescription;
+    pTask->pszTitle       = pszTitle;
+    pTask->nIconIndex     = nIconIndex;
 
     return S_OK;
 }
@@ -499,12 +517,12 @@ CDLAPI(HRESULT) ICDL_Initialize(ICDL** ppThis)
 
 CDLAPI(HRESULT) ICDL_CreateJumpList(ICDL* pThis, PCWSTR pcszAppId)
 {
-  return (HRESULT)SendMessage(pThis->hwnd, WM_CREATEJUMPLIST, pcszAppId, 0);
+  return (HRESULT)SendMessage(pThis->hwnd, WM_CREATEJUMPLIST, (WPARAM)pcszAppId, 0);
 }
 
-CDLAPI(HRESULT) ICDL_AddUserTasks(ICDL* pThis, ITask* pTasks, UINT elems)
+CDLAPI(HRESULT) ICDL_AddUserTasks(ICDL* pThis, ITask* pTasks, UINT16 elems, UINT16 offset)
 {
-  return (HRESULT)SendMessage(pThis->hwnd, WM_ADDUSERTASKS, pTasks, elems);
+  return (HRESULT)SendMessage(pThis->hwnd, WM_ADDUSERTASKS, (WPARAM)pTasks, MAKELPARAM(offset, elems));
 }
 
 CDLAPI(HRESULT) ICDL_AddSeparator(ICDL* pThis)
@@ -522,6 +540,8 @@ BOOL APIENTRY DllMain( HMODULE hModule,
                        LPVOID lpReserved
                      )
 {
+    UNREFERENCED_PARAMETER(lpReserved);
+
     switch (ul_reason_for_call)
     {
     case DLL_PROCESS_ATTACH:

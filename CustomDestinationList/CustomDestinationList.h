@@ -5,6 +5,7 @@
 #define COBJMACROS
 #define OEMRESOURCE
 #include <windows.h>
+#include <windowsx.h>
 #include <tchar.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -42,21 +43,13 @@
 typedef struct CDL ICDL;
 typedef struct Task ITask;
 
-typedef struct ICDL_TASK_PARAMS
-{
-  LPCTSTR szArgs;
-  LPCTSTR szDescription;
-  LPCTSTR szTitle;
-  int nIconIndex;
-}ICDL_TASK_PARAMS;
-
 CDLAPI(HRESULT) ICDL_Initialize(ICDL** ppThis);
 
 CDLAPI(HRESULT) ICDL_CreateTaskList(ICDL* pThis, UINT elems, ITask** ppTasks);
-CDLAPI(HRESULT) ICDL_SetTask(ICDL* pThis, ITask* pTasks, UINT elem, const ICDL_TASK_PARAMS* params);
+CDLAPI(HRESULT) ICDL_SetTask(ICDL* pThis, ITask* pTasks, UINT elem, LPCTSTR pszImage, LPCTSTR pszArgs, LPCTSTR pszDescription, LPCTSTR pszTitle, int nIconIndex);
 
 CDLAPI(HRESULT) ICDL_CreateJumpList(ICDL* icdl, PCWSTR pcszAppId);
-CDLAPI(HRESULT) ICDL_AddUserTasks(ICDL* pThis, ITask* pTasks, UINT elems);
+CDLAPI(HRESULT) ICDL_AddUserTasks(ICDL* pThis, ITask* pTasks, UINT16 elems, UINT16 offset);
 CDLAPI(HRESULT) ICDL_AddSeparator(ICDL* pThis);
 
 CDLAPI(HRESULT) ICDL_CommitJumpList(ICDL* pThis);
