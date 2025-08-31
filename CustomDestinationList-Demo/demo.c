@@ -87,6 +87,7 @@ void _tmain(void)
     {
       typedef struct TASK
       {
+        LPCTSTR szImage;
         LPCTSTR szArgs;
         LPCTSTR szDescription;
         LPCTSTR szTitle;
@@ -96,32 +97,36 @@ void _tmain(void)
       static const TASK c_tasks[] =
       {
         {
+          _T("C:\\Windows\\system32\\cmd.exe"),
           _T(" "),
           _T("Hovered1"),
-          _T("Task1"),
+          _T("Command Prompt"),
           0
         },
         {
+          _T("C:\\Windows\\explorer.exe"),
           _T(" "),
           _T("Hovered2"),
-          _T("Task2"),
+          _T("File Explorer"),
           0
         },
         {
+          _T("C:\\Windows\\system32\\notepad.exe"),
           _T(" "),
           _T("Hovered3"),
-          _T("Task3"),
+          _T("Notepad"),
           0
         },
         {
+          _T("C:\\Windows\\regedit.exe"),
           _T(" "),
           _T("Hovered4"),
-          _T("Task4"),
+          _T("Registry Editor"),
           0
         }
       };
 
-      hr = ICDL_SetTask(icdl, pTasks, elm, NULL, c_tasks[elm].szArgs, c_tasks[elm].szDescription, c_tasks[elm].szTitle, c_tasks[elm].nIconIndex);
+      hr = ICDL_SetTask(icdl, pTasks, elm, c_tasks[elm].szImage, c_tasks[elm].szArgs, c_tasks[elm].szDescription, c_tasks[elm].szTitle, c_tasks[elm].nIconIndex);
 
       if (FAILED(hr))
       {

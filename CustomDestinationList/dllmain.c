@@ -123,6 +123,7 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UIN
     IPropertyStore* pps;
     PROPVARIANT pv;
     SIZE_T cbTitle;
+    LPCTSTR pszImage;
 
     pThis = GetInterfaceHandle(hwnd);
 
@@ -130,6 +131,7 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UIN
     {
       return E_FAIL;
     }
+
 
     for (elm = 0; elm < elems; ++elm)
     {
@@ -151,7 +153,9 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UIN
         return hr;
       }
 
-      hr = IShellLinkW_SetPath(psl, pThis->szImageName);
+      pszImage = c_pTask->pszImage ? c_pTask->pszImage : pThis->szImageName;
+
+      hr = IShellLinkW_SetPath(psl, pszImage);
 
       if (FAILED(hr))
       {
@@ -171,7 +175,7 @@ static FORCEINLINE HRESULT CALLBACK OnAddUserTasks(HWND hwnd, ITask* pTasks, UIN
         return hr;
       }
 
-      hr = IShellLinkW_SetIconLocation(psl, pThis->szImageName, (int)c_pTask->nIconIndex);
+      hr = IShellLinkW_SetIconLocation(psl, pszImage, (int)c_pTask->nIconIndex);
 
       if (FAILED(hr))
       {
