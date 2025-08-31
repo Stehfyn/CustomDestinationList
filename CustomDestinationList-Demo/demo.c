@@ -37,6 +37,17 @@ void _tmain(void)
     ITask*   pTasks;
     int      elm;
 
+    hr = CoInitializeEx(0,
+      COINIT_APARTMENTTHREADED |
+      COINIT_SPEED_OVER_MEMORY |
+      COINIT_DISABLE_OLE1DDE
+    );
+
+    if (FAILED(hr))
+    {
+      ExitProcess(EXIT_FAILURE);
+    }
+
     if (!SetProcessDpiAwarenessContext(
       DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
     {
