@@ -193,6 +193,7 @@ void _tmain(void)
     wcx.hbrBackground = CreateSolidBrush(RGB(43, 43, 43));
     wcx.hCursor       = LoadCursor(NULL, IDC_ARROW);
     wcx.lpszClassName = _T("CustomDestinationList-DemoWndClass");
+    wcx.hIcon         = LoadIcon((HINSTANCE)&__ImageBase, MAKEINTRESOURCE(101));
     szClassAtom       = (LPCTSTR)RegisterClassEx(&wcx);
 
     if (!szClassAtom)
@@ -200,7 +201,7 @@ void _tmain(void)
       ExitProcess(EXIT_FAILURE);
     }
 
-    hwnd = CreateWindowEx(WS_EX_WINDOWEDGE | WS_EX_APPWINDOW, szClassAtom, _T("CustomDestinationList-Demo"), WS_OVERLAPPEDWINDOW, 0, 0, 640, 480, HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
+    hwnd = CreateWindowEx(WS_EX_WINDOWEDGE | WS_EX_APPWINDOW, szClassAtom, _T("CustomDestinationList-Demo"), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480, HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
 
     if (!hwnd)
     {
