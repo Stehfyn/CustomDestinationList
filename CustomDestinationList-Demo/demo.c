@@ -4,16 +4,29 @@
 #include <dwmapi.h>
 #include <UxTheme.h>
 #include <vsstyle.h>
-
+#include <Vssym32.h>
 #include "resource.h"
 
 #pragma comment (lib, "dwmapi")
 #pragma comment (lib, "UxTheme")
+//#pragma comment (lib, "user32")
+//#pragma comment (lib, "windowsapp")
+
+#define RECTWIDTH(rc) \
+        (labs(rc.right - rc.left))
+#define RECTHEIGHT(rc) \
+        (labs(rc.bottom - rc.top))
+#define CLAMP(x, lo, hi) \
+        (max(lo, min(x, hi)))
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 static BOOL UAHWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam, LRESULT* lr);
+static HWND g_hWndListView = NULL;
+
+static void GetStartupRect(int nWidth, int nHeight, LPRECT lprc);
+
 #if (defined NDEBUG)
 int
 _tWinMain(
@@ -40,6 +53,9 @@ void _tmain(void)
     BOOL     fQuit;
     PWSTR    pszAppId;
     ITask*   pTasks;
+    STARTUPINFO si;
+    POINT    pt;
+    RECT     rc;
     int      elm;
 
     hr = CoInitializeEx(0,
@@ -207,7 +223,27 @@ void _tmain(void)
       ExitProcess(EXIT_FAILURE);
     }
 
-    hwnd = CreateWindowEx(WS_EX_WINDOWEDGE | WS_EX_APPWINDOW, szClassAtom, _T("CustomDestinationList-Demo"), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480, HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
+    GetStartupInfo(&si);
+    GetStartupRect(640, 480, &rc);
+
+    if (!(STARTF_USEPOSITION & si.dwFlags) && !si.hStdOutput)
+    {
+      hwnd = CreateWindowEx(
+        WS_EX_WINDOWEDGE | WS_EX_APPWINDOW,
+        szClassAtom, _T("CustomDestinationList-Demo"),
+        WS_OVERLAPPEDWINDOW, 
+        CW_USEDEFAULT, CW_USEDEFAULT, RECTWIDTH(rc), RECTHEIGHT(rc),
+        HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
+    }
+    else
+    {
+      hwnd = CreateWindowEx(
+        WS_EX_WINDOWEDGE | WS_EX_APPWINDOW,
+        szClassAtom, _T("CustomDestinationList-Demo"), 
+        WS_OVERLAPPEDWINDOW,
+        rc.left, rc.top, RECTWIDTH(rc), RECTHEIGHT(rc),
+        HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
+    }
 
     if (!hwnd)
     {
@@ -300,6 +336,36 @@ static PFNFLUSHMENUTHEME FlushMenuTheme;
 static PFNINVALIDATEAPPTHEME InvalidateAppTheme;
 static PFNREFRESHIMMERSIVECOLORPOLICYSTATE RefreshImmersiveColorPolicyState;
 
+static void MakeYummy(HWND hwnd)
+{
+  static HMODULE __uxtheme; 
+  static HMODULE __user32; 
+
+  if (!__uxtheme)
+  {
+    __uxtheme = GetModuleHandle(TEXT("UxTheme.dll"));
+    SetPreferredAppMode = (PFNSETPREFERREDAPPMODE)GetProcAddress(__uxtheme, MAKEINTRESOURCEA(135));
+    FlushMenuTheme = (PFNFLUSHMENUTHEME)GetProcAddress(__uxtheme, MAKEINTRESOURCEA(136));
+    InvalidateAppTheme = (PFNINVALIDATEAPPTHEME)GetProcAddress(__uxtheme, MAKEINTRESOURCEA(115));
+    RefreshImmersiveColorPolicyState = (PFNREFRESHIMMERSIVECOLORPOLICYSTATE)GetProcAddress(__uxtheme, MAKEINTRESOURCEA(104));
+  }
+
+  if (!__user32)
+  {
+    __user32 = GetModuleHandle(TEXT("user32.dll"));
+    SetWindowCompositionAttribute = (PFNSETWINDOWCOMPOSITIONATTRIBUTE)GetProcAddress(__user32, "SetWindowCompositionAttribute");
+  }
+
+  SetPreferredAppMode(PAM_ALLOWDARK);
+  SetProp(hwnd, TEXT("UseImmersiveDarkModeColors"), (HANDLE)1);
+  RefreshImmersiveColorPolicyState();
+  InvalidateAppTheme();
+  FlushMenuTheme();
+  BOOL fDark = TRUE;
+  WINDOWCOMPOSITIONATTRIBDATA data = { 26, &fDark, sizeof(fDark) };
+  SetWindowCompositionAttribute(hwnd, &data);
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
   static BOOL fMoving = FALSE;
@@ -319,7 +385,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     switch (wmId)
     {
     case ID_ANOTHER_ONE:
+    {
       break;
+    }
     case IDM_EXIT:
       DestroyWindow(hwnd);
       break;
@@ -330,21 +398,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
   break;
   case WM_NCCREATE:
   {
-    HMODULE __uxtheme = GetModuleHandle(TEXT("UxTheme.dll"));
-    HMODULE __user32 = GetModuleHandle(TEXT("user32.dll"));
-    SetWindowCompositionAttribute = (PFNSETWINDOWCOMPOSITIONATTRIBUTE)GetProcAddress(__user32, "SetWindowCompositionAttribute");
-    SetPreferredAppMode = (PFNSETPREFERREDAPPMODE)GetProcAddress(__uxtheme, MAKEINTRESOURCEA(135));
-    FlushMenuTheme = (PFNFLUSHMENUTHEME)GetProcAddress(__uxtheme, MAKEINTRESOURCEA(136));
-    InvalidateAppTheme = (PFNINVALIDATEAPPTHEME)GetProcAddress(__uxtheme, MAKEINTRESOURCEA(115));
-    RefreshImmersiveColorPolicyState = (PFNREFRESHIMMERSIVECOLORPOLICYSTATE)GetProcAddress(__uxtheme, MAKEINTRESOURCEA(104));
-    SetPreferredAppMode(PAM_ALLOWDARK);
-    SetProp(hwnd, TEXT("UseImmersiveDarkModeColors"), (HANDLE)1);
-    RefreshImmersiveColorPolicyState();
-    InvalidateAppTheme();
-    FlushMenuTheme();
-    BOOL fDark = TRUE;
-    WINDOWCOMPOSITIONATTRIBDATA data = { 26, &fDark, sizeof(fDark) };
-    SetWindowCompositionAttribute(hwnd, &data);
+    MakeYummy(hwnd);
     SetWindowTheme(hwnd, L"DarkMode_Explorer", 0);
     EnableNonClientDpiScaling(hwnd);
     break;
@@ -389,8 +443,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
   }
   case WM_WINDOWPOSCHANGING:
   {
-    ((LPWINDOWPOS)lParam)->flags |= SWP_DEFERERASE;
-    ((LPWINDOWPOS)lParam)->flags &= ~SWP_DRAWFRAME;
+    //((LPWINDOWPOS)lParam)->flags |= SWP_DEFERERASE;
+    //((LPWINDOWPOS)lParam)->flags &= ~SWP_DRAWFRAME;
     break;
   }
   case WM_DESTROY:
@@ -638,4 +692,84 @@ static BOOL UAHWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam, LR
     default:
         return 0;
     }
+}
+
+static void GetStartupRect(int nWidth, int nHeight, LPRECT lprc)
+{
+    RECT        rc;
+    STARTUPINFO si;
+
+    GetStartupInfo(&si);
+    rc.left   = 0;
+    rc.top    = 0;
+    rc.right  = nWidth;
+    rc.bottom = nHeight;
+
+    if (STARTF_USESIZE & si.dwFlags)
+    {
+      rc.right  = si.dwXSize;
+      rc.bottom = si.dwYSize;
+    }
+
+    if (si.hStdOutput)
+    {
+      MONITORINFO mi;
+      mi.cbSize = sizeof(mi);
+
+      if (GetMonitorInfo((HMONITOR)si.hStdOutput, &mi))
+      {
+        POINT pt;
+
+        pt.x = (LONG)((mi.rcWork.left) + (0.5f * RECTWIDTH(mi.rcWork)) + (-0.5f * RECTWIDTH(rc)));
+        pt.y = (LONG)((mi.rcWork.top) + (0.5f * RECTHEIGHT(mi.rcWork)) + (-0.5f * RECTHEIGHT(rc)));
+
+        rc.right  = pt.x + RECTWIDTH(rc);
+        rc.bottom = pt.y + RECTHEIGHT(rc);
+        rc.left   = pt.x;
+        rc.top    = pt.y;
+      }
+    }
+
+    if (STARTF_USEPOSITION & si.dwFlags)
+    {
+      rc.right  = (LONG)(si.dwX + RECTWIDTH(rc));
+      rc.bottom = (LONG)(si.dwY + RECTHEIGHT(rc));
+      rc.left   = (LONG)si.dwX;
+      rc.top    = (LONG)si.dwY;
+    }
+    
+    if (!(STARTF_USEPOSITION & si.dwFlags) && !si.hStdOutput)
+    {
+        //CW_USEDEFAULT, CW_USEDEFAULT, RECTWIDTH(rc), RECTHEIGHT(rc);
+    }
+    else
+    {
+      HMONITOR hMonitor;
+      MONITORINFO mi;
+      mi.cbSize = sizeof(mi);
+
+      hMonitor = MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST);
+
+      if (hMonitor && GetMonitorInfo(hMonitor, &mi))
+      {
+        LONG w;
+        LONG h;
+
+        w = RECTWIDTH(rc);
+        h = RECTHEIGHT(rc);
+
+        rc.left  = CLAMP(rc.left, mi.rcWork.left + 1, mi.rcWork.right - 1);
+        rc.right = rc.left + w;
+        rc.right = CLAMP(rc.right, mi.rcWork.left + 1, mi.rcWork.right - 1);
+        rc.left  = rc.right - w;
+
+        rc.top    = CLAMP(rc.top, mi.rcWork.top + 1, mi.rcWork.bottom - 1);
+        rc.bottom = rc.top + h;
+        rc.bottom = CLAMP(rc.bottom, mi.rcWork.top + 1, mi.rcWork.bottom - 1);
+        rc.top    = rc.bottom - h;
+      }
+      //rc.left, rc.top, RECTWIDTH(rc), RECTHEIGHT(rc);
+    }
+
+    (*lprc) = rc;
 }

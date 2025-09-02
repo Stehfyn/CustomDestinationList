@@ -1,5 +1,5 @@
 #pragma once
-#define NTDDI_VERSION NTDDI_WIN7  // Specifies that the minimum required platform is Windows 7.
+#define NTDDI_VERSION NTDDI_WIN8  // Specifies that the minimum required platform is Windows 7.
 #define WIN32_LEAN_AND_MEAN       // Exclude rarely-used stuff from Windows headers
 #define STRICT_TYPED_ITEMIDS      // Utilize strictly typed IDLists
 #define COBJMACROS
