@@ -9,6 +9,8 @@
 
 #pragma comment (lib, "dwmapi")
 #pragma comment (lib, "UxTheme")
+#pragma comment (lib, "Version")
+
 //#pragma comment (lib, "user32")
 //#pragma comment (lib, "windowsapp")
 
@@ -20,13 +22,22 @@
         (max(lo, min(x, hi)))
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
+#define HINST_THISCOMPONENT ((HINSTANCE)&__ImageBase)
+
+#define GetHeaders(base) \
+        ((PIMAGE_NT_HEADERS)((CONST LPBYTE)(base) + (base)->e_lfanew))
+
+#define GetSubsystem(base) \
+        ((GetHeaders((base)))->OptionalHeader.Subsystem)
+
+#define WS_SERVERSIDEPROC 0x0204
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 static BOOL UAHWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam, LRESULT* lr);
 static HWND g_hWndListView = NULL;
 
 static void GetStartupRect(int nWidth, int nHeight, LPRECT lprc);
-
+static void da(void);
 #if (defined NDEBUG)
 int
 _tWinMain(
@@ -57,13 +68,15 @@ void _tmain(void)
     POINT    pt;
     RECT     rc;
     int      elm;
-
+    WORD sub;
     hr = CoInitializeEx(0,
       COINIT_APARTMENTTHREADED |
       COINIT_SPEED_OVER_MEMORY |
       COINIT_DISABLE_OLE1DDE
     );
 
+    sub = GetSubsystem(&__ImageBase);
+    da();
     if (FAILED(hr))
     {
       ExitProcess(EXIT_FAILURE);
@@ -226,12 +239,17 @@ void _tmain(void)
     GetStartupInfo(&si);
     GetStartupRect(640, 480, &rc);
 
+    wprintf_s(L"__app_type: %d", _query_app_type());
+
     if (!(STARTF_USEPOSITION & si.dwFlags) && !si.hStdOutput)
     {
       hwnd = CreateWindowEx(
         WS_EX_WINDOWEDGE | WS_EX_APPWINDOW,
         szClassAtom, _T("CustomDestinationList-Demo"),
-        WS_OVERLAPPEDWINDOW, 
+        WS_OVERLAPPEDWINDOW
+        | WS_SERVERSIDEPROC
+        ,
+
         CW_USEDEFAULT, CW_USEDEFAULT, RECTWIDTH(rc), RECTHEIGHT(rc),
         HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
     }
@@ -240,7 +258,9 @@ void _tmain(void)
       hwnd = CreateWindowEx(
         WS_EX_WINDOWEDGE | WS_EX_APPWINDOW,
         szClassAtom, _T("CustomDestinationList-Demo"), 
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPEDWINDOW
+        | WS_SERVERSIDEPROC
+        ,
         rc.left, rc.top, RECTWIDTH(rc), RECTHEIGHT(rc),
         HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
     }
@@ -698,7 +718,7 @@ static void GetStartupRect(int nWidth, int nHeight, LPRECT lprc)
 {
     RECT        rc;
     STARTUPINFO si;
-
+    
     GetStartupInfo(&si);
     rc.left   = 0;
     rc.top    = 0;
@@ -772,4 +792,33 @@ static void GetStartupRect(int nWidth, int nHeight, LPRECT lprc)
     }
 
     (*lprc) = rc;
+}
+
+static void da(void)
+{
+  VS_FIXEDFILEINFO* pFixedInfo = NULL;
+  UINT len = 0;
+
+  TCHAR szImageName[MAX_PATH];
+  DWORD cchImageName = _countof(szImageName);
+  if (!QueryFullProcessImageName(GetCurrentProcess(), 0, szImageName, &cchImageName))
+    __debugbreak();
+
+  DWORD old;
+  BOOL fSuccess;
+  HRSRC hResInfo = FindResourceW(HINST_THISCOMPONENT, MAKEINTRESOURCE(1), RT_VERSION);
+  HGLOBAL hResData = LoadResource(HINST_THISCOMPONENT, hResInfo);
+  void* pRes = LockResource(hResData);
+  fSuccess = VirtualProtect(pFixedInfo, sizeof(VS_FIXEDFILEINFO), PAGE_EXECUTE_READWRITE, &old);
+
+  fSuccess = VerQueryValueW(pRes, L"\\", (LPVOID*)(&pFixedInfo), &len);
+
+  VS_FIXEDFILEINFO fixed = *pFixedInfo;
+  fixed.dwFileVersionMS = (2 << 16) | 0;  // 2.0
+  fixed.dwFileVersionLS = (0 << 16) | 0;  // .0
+
+  HANDLE hRes = BeginUpdateResourceW(szImageName, FALSE);
+  fSuccess = UpdateResourceW(hRes, RT_VERSION, MAKEINTRESOURCE(1), MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
+    &fixed, sizeof(fixed));
+  fSuccess = EndUpdateResourceW(hRes, FALSE);
 }
