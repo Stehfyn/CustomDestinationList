@@ -1,6 +1,10 @@
 #include "CustomDestinationList.h"
-//#include "ImmersiveFlyouts.h"
 
+#include <windows.h>
+#include <windowsx.h>
+#include <oleauto.h>
+#include <shlobj.h>
+#include <shobjidl.h>
 #include <dwmapi.h>
 #include <UxTheme.h>
 #include <vsstyle.h>
@@ -11,9 +15,6 @@
 #pragma comment (lib, "UxTheme")
 #pragma comment (lib, "Version")
 
-//#pragma comment (lib, "user32")
-//#pragma comment (lib, "windowsapp")
-
 #define RECTWIDTH(rc) \
         (labs(rc.right - rc.left))
 #define RECTHEIGHT(rc) \
@@ -22,30 +23,19 @@
         (max(lo, min(x, hi)))
 
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
-#define HINST_THISCOMPONENT ((HINSTANCE)&__ImageBase)
-
-#define GetHeaders(base) \
-        ((PIMAGE_NT_HEADERS)((CONST LPBYTE)(base) + (base)->e_lfanew))
-
-#define GetSubsystem(base) \
-        ((GetHeaders((base)))->OptionalHeader.Subsystem)
-
-#define WS_SERVERSIDEPROC 0x0204
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 static BOOL UAHWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam, LRESULT* lr);
-static HWND g_hWndListView = NULL;
-
 static void GetStartupRect(int nWidth, int nHeight, LPRECT lprc);
-static void da(void);
+
 #if (defined NDEBUG)
 int
+__stdcall
 _tWinMain(
   _In_ HINSTANCE hInstance,
   _In_opt_ HINSTANCE hPrevInstance,
   _In_ LPTSTR lpCmdLine,
-  _In_ int nShowCmd
-)
+  _In_ int nShowCmd)
 {
   UNREFERENCED_PARAMETER(hInstance);
   UNREFERENCED_PARAMETER(hPrevInstance);
@@ -55,29 +45,18 @@ _tWinMain(
 void _tmain(void)
 {
 #endif
-    HRESULT  hr;
-    ICDL*    icdl;
+    HRESULT hr;
+    ICDL* icdl;
     WNDCLASSEX wcx;
-    LPCTSTR  szClassAtom;
-    HWND     hwnd;
-    MSG      msg;
-    BOOL     fQuit;
-    PWSTR    pszAppId;
-    ITask*   pTasks;
+    LPCTSTR szClassAtom;
+    HWND hwnd;
+    MSG msg;
+    BOOL fQuit;
+    PWSTR pszAppId;
     STARTUPINFO si;
-    POINT    pt;
-    RECT     rc;
-    int      elm;
-    WORD sub;
-    hr = CoInitializeEx(0,
-      COINIT_APARTMENTTHREADED |
-      COINIT_SPEED_OVER_MEMORY |
-      COINIT_DISABLE_OLE1DDE
-    );
+    RECT rc;
 
-    sub = GetSubsystem(&__ImageBase);
-    da();
-    if (FAILED(hr))
+    if (FAILED(hr = CoInitializeEx(0, COINIT_APARTMENTTHREADED | COINIT_SPEED_OVER_MEMORY | COINIT_DISABLE_OLE1DDE)))
     {
       ExitProcess(EXIT_FAILURE);
     }
@@ -88,135 +67,89 @@ void _tmain(void)
       ExitProcess(EXIT_FAILURE);
     }
 
-    hr = SetCurrentProcessExplicitAppUserModelID(L"CustomDestinationList-Demo");
-
-    if (FAILED(hr))
+    if (FAILED(hr = SetCurrentProcessExplicitAppUserModelID(L"CustomDestinationList-Demo")))
     {
       ExitProcess(EXIT_FAILURE);
     }
 
     pszAppId = NULL;
-    hr = GetCurrentProcessExplicitAppUserModelID(&pszAppId);
-
-    if (FAILED(hr))
+    if (FAILED(hr = GetCurrentProcessExplicitAppUserModelID(&pszAppId)))
     {
       ExitProcess(EXIT_FAILURE);
     }
 
-    hr = ICDL_Initialize(&icdl);
-
-    if (FAILED(hr))
+    if (SUCCEEDED(hr = ICDL_BeginList(pszAppId, &icdl)))
     {
-      ExitProcess(EXIT_FAILURE);
-    }
+      int elm;
 
-    hr = ICDL_CreateTaskList(icdl, 4, &pTasks);
+      CoTaskMemFree(pszAppId);
 
-    if (FAILED(hr))
-    {
-      ExitProcess(EXIT_FAILURE);
-    }
-
-    for (elm = 0; elm < 4; ++elm)
-    {
-      typedef struct TASK
+      for (elm = 0; elm < 4; ++elm)
       {
-        LPCTSTR szImage;
-        LPCTSTR szArgs;
-        LPCTSTR szDescription;
-        LPCTSTR szTitle;
-        int nIconIndex;
-      } TASK;
-
-      static const TASK c_tasks[] =
-      {
+        if (0 == elm)
         {
-          _T("C:\\Windows\\system32\\cmd.exe"),
-          _T(" "),
-          _T("Hovered1"),
-          _T("Command Prompt"),
-          0
-        },
-        {
-          _T("C:\\Windows\\explorer.exe"),
-          _T(" "),
-          _T("Hovered2"),
-          _T("File Explorer"),
-          0
-        },
-        {
-          _T("C:\\Windows\\system32\\notepad.exe"),
-          _T(" "),
-          _T("Hovered3"),
-          _T("Notepad"),
-          0
-        },
-        {
-          _T("C:\\Windows\\regedit.exe"),
-          _T(" "),
-          _T("Hovered4"),
-          _T("Registry Editor"),
-          0
+          if (FAILED(hr = ICDL_AddSeparator(icdl)))
+          {
+            ExitProcess(EXIT_FAILURE);
+          }
         }
-      };
 
-      hr = ICDL_SetTask(icdl, pTasks, elm, c_tasks[elm].szImage, c_tasks[elm].szArgs, c_tasks[elm].szDescription, c_tasks[elm].szTitle, c_tasks[elm].nIconIndex);
+        typedef struct TASK
+        {
+          LPCTSTR szImage;
+          LPCTSTR szArgs;
+          LPCTSTR szDescription;
+          LPCTSTR szTitle;
+          int nIconIndex;
+        } TASK;
 
-      if (FAILED(hr))
+        static const TASK c_tasks[] =
+        {
+          {
+            _T("C:\\Windows\\system32\\cmd.exe"),
+            _T(" "),
+            _T("Hovered1"),
+            _T("Command Prompt"),
+            0
+          },
+          {
+            _T("C:\\Windows\\explorer.exe"),
+            _T(" "),
+            _T("Hovered2"),
+            _T("File Explorer"),
+            0
+          },
+          {
+            _T("C:\\Windows\\system32\\notepad.exe"),
+            _T(" "),
+            _T("Hovered3"),
+            _T("Notepad"),
+            0
+          },
+          {
+            _T("C:\\Windows\\regedit.exe"),
+            _T(" "),
+            _T("Hovered4"),
+            _T("Registry Editor"),
+            0
+          }
+        };
+
+        if (FAILED(hr = ICDL_AddTask(icdl,
+                                     c_tasks[elm].szImage,
+                                     c_tasks[elm].szArgs,
+                                     c_tasks[elm].szDescription,
+                                     c_tasks[elm].szTitle,
+                                     c_tasks[elm].nIconIndex)))
+        {
+          ExitProcess(EXIT_FAILURE);
+        }
+      }
+
+      if (FAILED(hr = ICDL_CommitList(icdl)))
       {
         ExitProcess(EXIT_FAILURE);
       }
-    }
-
-    hr = ICDL_CreateJumpList(icdl, pszAppId);
-
-    if (FAILED(hr))
-    {
-      ExitProcess(EXIT_FAILURE);
-    }
-
-    CoTaskMemFree(pszAppId);
-
-    hr = ICDL_AddSeparator(icdl);
-
-    if (FAILED(hr))
-    {
-      return hr;
-    }
-
-    hr = ICDL_AddUserTasks(icdl, pTasks, 2, 0);
-
-    if (FAILED(hr))
-    {
-      ExitProcess(EXIT_FAILURE);
-    }
-
-    hr = ICDL_AddSeparator(icdl);
-
-    if (FAILED(hr))
-    {
-      return hr;
-    }
-    
-    hr = ICDL_AddUserTasks(icdl, pTasks, 2, 2);
-
-    if (FAILED(hr))
-    {
-      ExitProcess(EXIT_FAILURE);
-    }
-
-    hr = ICDL_AddSeparator(icdl);
-
-    if (FAILED(hr))
-    {
-      return hr;
-    }
-
-    hr = ICDL_CommitJumpList(icdl);
-
-    if (FAILED(hr))
-    {
-      ExitProcess(EXIT_FAILURE);
     }
 
     SecureZeroMemory(&wcx, sizeof(wcx));
@@ -226,9 +159,9 @@ void _tmain(void)
     wcx.hInstance     = (HINSTANCE)&__ImageBase;
     wcx.hbrBackground = CreateSolidBrush(RGB(43, 43, 43));
     wcx.hCursor       = LoadCursor(NULL, IDC_ARROW);
-    wcx.lpszMenuName  = MAKEINTRESOURCEW(IDC_WIN32CUSTOMMENUBARAEROTHEME);
+    wcx.lpszMenuName  = MAKEINTRESOURCE(IDC_WIN32CUSTOMMENUBARAEROTHEME);
     wcx.lpszClassName = _T("CustomDestinationList-DemoWndClass");
-    wcx.hIcon         = LoadIcon((HINSTANCE)&__ImageBase, MAKEINTRESOURCE(101));
+    wcx.hIcon         = LoadIcon((HINSTANCE)&__ImageBase, MAKEINTRESOURCE(IDI_ICON1));
     szClassAtom       = (LPCTSTR)RegisterClassEx(&wcx);
 
     if (!szClassAtom)
@@ -239,17 +172,12 @@ void _tmain(void)
     GetStartupInfo(&si);
     GetStartupRect(640, 480, &rc);
 
-    wprintf_s(L"__app_type: %d", _query_app_type());
-
     if (!(STARTF_USEPOSITION & si.dwFlags) && !si.hStdOutput)
     {
       hwnd = CreateWindowEx(
         WS_EX_WINDOWEDGE | WS_EX_APPWINDOW,
         szClassAtom, _T("CustomDestinationList-Demo"),
-        WS_OVERLAPPEDWINDOW
-        | WS_SERVERSIDEPROC
-        ,
-
+        WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, RECTWIDTH(rc), RECTHEIGHT(rc),
         HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
     }
@@ -258,21 +186,12 @@ void _tmain(void)
       hwnd = CreateWindowEx(
         WS_EX_WINDOWEDGE | WS_EX_APPWINDOW,
         szClassAtom, _T("CustomDestinationList-Demo"), 
-        WS_OVERLAPPEDWINDOW
-        | WS_SERVERSIDEPROC
-        ,
+        WS_OVERLAPPEDWINDOW,
         rc.left, rc.top, RECTWIDTH(rc), RECTHEIGHT(rc),
         HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
     }
 
     if (!hwnd)
-    {
-      ExitProcess(EXIT_FAILURE);
-    }
-
-    hr = SetWindowTheme(hwnd, L"DarkMode_Explorer", NULL);
-
-    if (FAILED(hr))
     {
       ExitProcess(EXIT_FAILURE);
     }
@@ -287,6 +206,7 @@ void _tmain(void)
       SecureZeroMemory(&msg, sizeof(msg));
       while (PeekMessage(&msg, 0, 0, 0, PM_REMOVE))
       {
+        TranslateMessage(&msg);
         DispatchMessage(&msg);
 
         fQuit |= (WM_QUIT == msg.message);
@@ -304,6 +224,7 @@ void _tmain(void)
     ExitProcess(EXIT_SUCCESS);
 }
 
+#pragma region dontcare
 // Affects the rendering of the background of a window. 
 typedef enum tagACCENT_STATE {
   ACCENT_DISABLED = 0,  // Default value. Background is black.
@@ -618,13 +539,23 @@ static BOOL UAHWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam, LR
         HBRUSH* pbrBorder = &g_brItemBackground;
 
         // get the menu item string
-        wchar_t menuString[256] = { 0 };
+        WCHAR menuString[256] = { 0 };
+#ifdef _MBCS
+        CHAR menuStringTemp[256] = { 0 };
+#endif
         MENUITEMINFO mii = { sizeof(mii), MIIM_STRING };
         {
+#ifdef _MBCS
+            mii.dwTypeData = menuStringTemp;
+            mii.cch = _countof(menuStringTemp);
+#else
             mii.dwTypeData = menuString;
-            mii.cch = (sizeof(menuString) / 2) - 1;
-
+            mii.cch = _countof(menuString);
+#endif
             GetMenuItemInfo(pUDMI->um.hmenu, pUDMI->umi.iPosition, TRUE, &mii);
+#ifdef _MBCS
+            MultiByteToWideChar(CP_UTF8, 0, menuStringTemp, _countof(menuStringTemp), menuString, _countof(menuString));
+#endif
         }
 
         // get the item state for drawing
@@ -793,32 +724,4 @@ static void GetStartupRect(int nWidth, int nHeight, LPRECT lprc)
 
     (*lprc) = rc;
 }
-
-static void da(void)
-{
-  VS_FIXEDFILEINFO* pFixedInfo = NULL;
-  UINT len = 0;
-
-  TCHAR szImageName[MAX_PATH];
-  DWORD cchImageName = _countof(szImageName);
-  if (!QueryFullProcessImageName(GetCurrentProcess(), 0, szImageName, &cchImageName))
-    __debugbreak();
-
-  DWORD old;
-  BOOL fSuccess;
-  HRSRC hResInfo = FindResourceW(HINST_THISCOMPONENT, MAKEINTRESOURCE(1), RT_VERSION);
-  HGLOBAL hResData = LoadResource(HINST_THISCOMPONENT, hResInfo);
-  void* pRes = LockResource(hResData);
-  fSuccess = VirtualProtect(pFixedInfo, sizeof(VS_FIXEDFILEINFO), PAGE_EXECUTE_READWRITE, &old);
-
-  fSuccess = VerQueryValueW(pRes, L"\\", (LPVOID*)(&pFixedInfo), &len);
-
-  VS_FIXEDFILEINFO fixed = *pFixedInfo;
-  fixed.dwFileVersionMS = (2 << 16) | 0;  // 2.0
-  fixed.dwFileVersionLS = (0 << 16) | 0;  // .0
-
-  HANDLE hRes = BeginUpdateResourceW(szImageName, FALSE);
-  fSuccess = UpdateResourceW(hRes, RT_VERSION, MAKEINTRESOURCE(1), MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
-    &fixed, sizeof(fixed));
-  fSuccess = EndUpdateResourceW(hRes, FALSE);
-}
+#pragma endregion
