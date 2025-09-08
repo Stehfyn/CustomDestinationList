@@ -31,30 +31,29 @@
   #pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #endif
 
-typedef struct CDL ICDL;
+/**************************************************************************************************************************\
+* Excerpt from: https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-icustomdestinationlist  *
+*   >   A custom Jump List is never truly updated in the sense of changing elements in an existing list. Rather, the old   *
+*       list is replaced with a new list.                                                                                  *
+*                                                                                                                          *
+*       The basic sequence of ICustomDestinationList method calls to build and display a custom Jump List is as follows:   *
+*                                                                                                                          *
+*         1). SetAppID (required only if an application provides its own AppUserModelID)                                   *
+*         2). BeginList                                                                                                    *
+*         3). AppendCategory, AppendKnownCategory, AddUserTasks, or any combination of those three methods.                *
+*         4). CommitList                                                                                                   *
+\**************************************************************************************************************************/
 
-// C:\%UserProfile%\AppData\Roaming\Microsoft\Windows\Recent\CustomDestinations
-/* Excerpt from: https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-icustomdestinationlist *\
-* 
-*   >   A custom Jump List is never truly updated in the sense of changing elements in an existing list. Rather, the old
-*       list is replaced with a new list.
-* 
-*       The basic sequence of ICustomDestinationList method calls to build and display a custom Jump List is as follows:
-* 
-*         1). SetAppID (required only if an application provides its own AppUserModelID)
-*         2). BeginList
-*         3). AppendCategory, AppendKnownCategory, AddUserTasks, or any combination of those three methods.
-*         4). CommitList
-\* */
+typedef struct CDL ICDL;
 
 CDLAPI(HRESULT) ICDL_BeginList(LPCWSTR pcwszAppId, ICDL** ppThis);
 CDLAPI(HRESULT) ICDL_BeginCategoryA(ICDL* pThis, LPCSTR pcszCategory);
 CDLAPI(HRESULT) ICDL_BeginCategoryW(ICDL* pThis, LPCWSTR pcwszCategory);
-CDLAPI(HRESULT) ICDL_AddTaskA(ICDL* pThis, LPCSTR pcszImage, LPCSTR pcszArgs, LPCSTR pcszDescription, LPCSTR pcszTitle, int nIconIndex);
-CDLAPI(HRESULT) ICDL_AddTaskW(ICDL* pThis, LPCWSTR pcwszImage, LPCWSTR pcwszArgs, LPCWSTR pcwszDescription, LPCWSTR pcwszTitle, int nIconIndex);
+CDLAPI(HRESULT) ICDL_AddTaskA(ICDL* pThis, LPCSTR pcszImage, LPCSTR pcszArgs, LPCSTR pcszDescription, LPCSTR pcszTitle, LPCSTR pcszIconLocation, int nIconIndex);
+CDLAPI(HRESULT) ICDL_AddTaskW(ICDL* pThis, LPCWSTR pcwszImage, LPCWSTR pcwszArgs, LPCWSTR pcwszDescription, LPCWSTR pcwszTitle, LPCWSTR pcwszIconLocation, int nIconIndex);
 CDLAPI(HRESULT) ICDL_AddSeparator(ICDL* pThis);
 CDLAPI(HRESULT) ICDL_CommitCategory(ICDL* pThis);
-CDLAPI(HRESULT) ICDL_CommitList(ICDL* pThis);
+CDLAPI(HRESULT) ICDL_CommitList(ICDL* pThis); // C:\%UserProfile%\AppData\Roaming\Microsoft\Windows\Recent\CustomDestinations
 CDLAPI(VOID)    ICDL_Release(ICDL* pThis);
 
 #ifdef _UNICODE

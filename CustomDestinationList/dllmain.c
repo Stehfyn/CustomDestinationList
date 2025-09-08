@@ -12,10 +12,12 @@
 #pragma comment (lib, "Propsys")
 
 // Adding macros <suppress.h> _conveniently_ does not provide
-#define __WARNING_PADDING_ADDED_AFTER_DATA_MEMBER    4820
-#define __WARNING_SPECTRE_MITIGATION_FOR_MEMORY_LOAD 5045
-#pragma warning(disable:__WARNING_PADDING_ADDED_AFTER_DATA_MEMBER)    // 4820 Pad this bud
-#pragma warning(disable:__WARNING_SPECTRE_MITIGATION_FOR_MEMORY_LOAD) // 5045 Mitigate this bud
+#define __WARNING_EXPRESSION_BEFORE_COMMA_HAS_NO_EFFECT 4548
+#define __WARNING_PADDING_ADDED_AFTER_DATA_MEMBER       4820
+#define __WARNING_SPECTRE_MITIGATION_FOR_MEMORY_LOAD    5045
+#pragma warning(disable:__WARNING_EXPRESSION_BEFORE_COMMA_HAS_NO_EFFECT) // 4548 Sure bud
+#pragma warning(disable:__WARNING_PADDING_ADDED_AFTER_DATA_MEMBER)       // 4820 Pad this bud
+#pragma warning(disable:__WARNING_SPECTRE_MITIGATION_FOR_MEMORY_LOAD)    // 5045 Mitigate this bud
 
 #define CDLAPIPRIVATE(type) static __forceinline type __cdecl
 
@@ -33,9 +35,10 @@
 typedef struct CTASKW
 {
   WCHAR wszImage[_MAX_ENV];
-  WCHAR wszArgs[_MAX_ENV];  // Don't assume how this makes its way to NtCreateProcess https://stackoverflow.com/a/28452546
+  WCHAR wszArgs[_MAX_ENV]; // Don't assume how this makes its way to NtCreateProcess https://stackoverflow.com/a/28452546
   WCHAR wszDescription[INFOTIPSIZE];
   WCHAR wszTitle[INFOTIPSIZE];
+  WCHAR wszIconLocation[_MAX_ENV];
   LONG_PTR nIconIndex;
 } CTASKW, *PCTASKW;
 
@@ -45,6 +48,7 @@ typedef struct TASKV
   LPCVOID pcvArgs;
   LPCVOID pcvDescription;
   LPCVOID pcvTitle;
+  LPCVOID pcvIconLocation;
   LONG_PTR nIconIndex;
 } TASKV, *PTASKV;
 
@@ -54,6 +58,7 @@ typedef struct TASKW
   LPCWSTR pcwszArgs;
   LPCWSTR pcwszDescription;
   LPCWSTR pcwszTitle;
+  LPCWSTR pcwszIconLocation;
   LONG_PTR nIconIndex;
 } TASKW, *PTASKW;
 
@@ -92,18 +97,16 @@ CDLAPIPRIVATE(void) SafeRelease(IUnknown** ppInterfaceToRelease)
     }
 }
 
-// Three options:
+// Four options:
 // 1). Use deprecated IsBadHugeReadPtr()/ IsBadHugeWritePtr, and open self up to certain uncaught SEH exceptions for things like page guards
 // 2). Use VirtualQuery, and tank kernel traps to consult the memory manager
 // 3). Roll our own userspace validation, leveraging optimizations-disabled idempotent memcpy->memset->memcpy (swap-zero-swap) via a temporary buffer
+// 4). Choose to not care--just evaluate the pointer to a boolean, because the above only matters in a true arbitrary ASTA or MTA COM apartment evnvironment
 CDLAPIPRIVATE(BOOL) EnsurePointer(void* lp, UINT_PTR ucb)
 {
-    if (IsBadHugeReadPtr(lp, ucb) || IsBadHugeWritePtr(lp, ucb))
-    {
-      return FALSE;
-    }
-
-    return TRUE;
+    UNREFERENCED_PARAMETER(ucb);
+    
+    return !!lp;
 }
 
 CDLAPIPRIVATE(BOOL) IsSystemCategory(PCWSTR pcwszCategory)
@@ -232,7 +235,6 @@ CDLAPIPRIVATE(HRESULT) AddUserTask(ICDL* pThis, PTASKV pvTask, BOOL fAnsi)
       {
         PTASKW  pwTask;
         PCTASKW pwCTask;
-        LPCWSTR pcwszImage;
 
         pwCTask = NULL;
 
@@ -242,14 +244,16 @@ CDLAPIPRIVATE(HRESULT) AddUserTask(ICDL* pThis, PTASKV pvTask, BOOL fAnsi)
 
           if (SUCCEEDED(hr = pwCTask ? S_OK : E_OUTOFMEMORY))
           {
-            MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pvTask->pcvImage, -1, pwCTask->wszImage, _countof(pwCTask->wszImage));
-            MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pvTask->pcvArgs, -1, pwCTask->wszArgs, _countof(pwCTask->wszArgs));
-            MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pvTask->pcvDescription, -1, pwCTask->wszDescription, _countof(pwCTask->wszDescription));
-            MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pvTask->pcvTitle, -1, pwCTask->wszTitle, _countof(pwCTask->wszTitle));
-            pvTask->pcvImage       = pwCTask->wszImage;
-            pvTask->pcvArgs        = pwCTask->wszArgs;
-            pvTask->pcvDescription = pwCTask->wszDescription;
-            pvTask->pcvTitle       = pwCTask->wszTitle;
+            MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pvTask->pcvImage,        -1, pwCTask->wszImage,        _countof(pwCTask->wszImage));
+            MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pvTask->pcvArgs,         -1, pwCTask->wszArgs,         _countof(pwCTask->wszArgs));
+            MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pvTask->pcvDescription,  -1, pwCTask->wszDescription,  _countof(pwCTask->wszDescription));
+            MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pvTask->pcvTitle,        -1, pwCTask->wszTitle,        _countof(pwCTask->wszTitle));
+            MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pvTask->pcvIconLocation, -1, pwCTask->wszIconLocation, _countof(pwCTask->wszIconLocation));
+            pvTask->pcvImage        = pwCTask->wszImage;
+            pvTask->pcvArgs         = pwCTask->wszArgs;
+            pvTask->pcvDescription  = pwCTask->wszDescription;
+            pvTask->pcvTitle        = pwCTask->wszTitle;
+            pvTask->pcvIconLocation = pwCTask->wszIconLocation;
           }
         }
 
@@ -257,13 +261,19 @@ CDLAPIPRIVATE(HRESULT) AddUserTask(ICDL* pThis, PTASKV pvTask, BOOL fAnsi)
 
         if (SUCCEEDED(hr))
         {
+          LPCWSTR pcwszImage;
+
           pcwszImage = pwTask->pcwszImage ? pwTask->pcwszImage : pThis->wszImageName;
 
           if (SUCCEEDED(hr = IShellLinkW_SetPath(psl, pcwszImage)))
           {
             if (SUCCEEDED(hr = IShellLinkW_SetArguments(psl, pwTask->pcwszArgs)))
             {
-              if (SUCCEEDED(hr = IShellLinkW_SetIconLocation(psl, pcwszImage, (int)pwTask->nIconIndex)))
+              LPCWSTR pcwszIconLocation;
+
+              pcwszIconLocation = (pwTask->pcwszIconLocation) ? pwTask->pcwszIconLocation : pwTask->pcwszImage;
+
+              if (SUCCEEDED(hr = IShellLinkW_SetIconLocation(psl, pcwszIconLocation, (int)pwTask->nIconIndex)))
               {
                 if (SUCCEEDED(hr = IShellLinkW_SetDescription(psl, pwTask->pcwszDescription)))
                 {
@@ -422,34 +432,36 @@ CDLAPI(HRESULT) ICDL_BeginCategoryW(ICDL* pThis, LPCWSTR pcwszCategory)
     return BeginCategory(pThis, pcwszCategory, CDL_NOT_ANSI);
 }
 
-CDLAPI(HRESULT) ICDL_AddTaskA(ICDL* pThis, LPCSTR pcszImage, LPCSTR pcszArgs, LPCSTR pcszDescription, LPCSTR pcszTitle, int nIconIndex)
+CDLAPI(HRESULT) ICDL_AddTaskA(ICDL* pThis, LPCSTR pcszImage, LPCSTR pcszArgs, LPCSTR pcszDescription, LPCSTR pcszTitle, LPCSTR pcszIconLocation, int nIconIndex)
 {
     TASKV vtask;
 
     VALIDATE_RETURN_HRESULT(EnsurePointer(pThis, sizeof(ICDL)), E_POINTER, "ICDL* pointer is invalid");
     VALIDATE_RETURN_HRESULT(pThis->fInBeginList, E_INVALIDARG, "Must be currently creating a jump list");
 
-    vtask.pcvImage       = pcszImage;
-    vtask.pcvArgs        = pcszArgs;
-    vtask.pcvDescription = pcszDescription;
-    vtask.pcvTitle       = pcszTitle;
-    vtask.nIconIndex     = nIconIndex;
+    vtask.pcvImage        = pcszImage;
+    vtask.pcvArgs         = pcszArgs;
+    vtask.pcvDescription  = pcszDescription;
+    vtask.pcvTitle        = pcszTitle;
+    vtask.pcvIconLocation = pcszIconLocation;
+    vtask.nIconIndex      = nIconIndex;
 
     return AddUserTask(pThis, &vtask, CDL_ANSI);
 }
 
-CDLAPI(HRESULT) ICDL_AddTaskW(ICDL* pThis, LPCWSTR pcwszImage, LPCWSTR pcwszArgs, LPCWSTR pcwszDescription, LPCWSTR pcwszTitle, int nIconIndex)
+CDLAPI(HRESULT) ICDL_AddTaskW(ICDL* pThis, LPCWSTR pcwszImage, LPCWSTR pcwszArgs, LPCWSTR pcwszDescription, LPCWSTR pcwszTitle, LPCWSTR pcwszIconLocation, int nIconIndex)
 {
     TASKV vtask;
 
     VALIDATE_RETURN_HRESULT(EnsurePointer(pThis, sizeof(ICDL)), E_POINTER, "ICDL* pointer is invalid");
     VALIDATE_RETURN_HRESULT(pThis->fInBeginList, E_INVALIDARG, "Must be currently creating a jump list");
 
-    vtask.pcvImage       = pcwszImage;
-    vtask.pcvArgs        = pcwszArgs;
-    vtask.pcvDescription = pcwszDescription;
-    vtask.pcvTitle       = pcwszTitle;
-    vtask.nIconIndex     = nIconIndex;
+    vtask.pcvImage        = pcwszImage;
+    vtask.pcvArgs         = pcwszArgs;
+    vtask.pcvDescription  = pcwszDescription;
+    vtask.pcvTitle        = pcwszTitle;
+    vtask.pcvIconLocation = pcwszIconLocation;
+    vtask.nIconIndex      = nIconIndex;
 
     return AddUserTask(pThis, &vtask, CDL_NOT_ANSI);
 }

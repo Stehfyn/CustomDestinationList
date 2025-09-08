@@ -57,12 +57,7 @@ void _tmain(void)
     STARTUPINFO si;
     RECT rc;
 
-    if (FAILED(hr = CoInitializeEx(0, COINIT_MULTITHREADED | COINIT_SPEED_OVER_MEMORY | COINIT_DISABLE_OLE1DDE)))
-    {
-      ExitProcess(EXIT_FAILURE);
-    }
-
-    if (S_OK != SetProcessDpiAwareness(DPI_AWARENESS_PER_MONITOR_AWARE))
+    if (FAILED(hr = CoInitializeEx(0, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE | COINIT_SPEED_OVER_MEMORY)))
     {
       ExitProcess(EXIT_FAILURE);
     }
@@ -83,7 +78,7 @@ void _tmain(void)
     {
       CoTaskMemFree(pszAppId);
 
-      if (SUCCEEDED(hr = ICDL_BeginCategory(pcdl, _T("Custom Category"))))
+      if (SUCCEEDED(hr = ICDL_BeginCategory(pcdl, _T("Quick Launch"))))
       {
         int elm;
 
@@ -101,28 +96,28 @@ void _tmain(void)
           static const TASKV c_tasks[] =
           {
             {
-              _T("C:\\Windows\\system32\\cmd.exe"),
+              _T("%SystemRoot%\\system32\\cmd.exe"),
               _T(" "),
               _T("Hovered1"),
               _T("Command Prompt"),
               0
             },
             {
-              _T("C:\\Windows\\explorer.exe"),
+              _T("%SystemRoot%\\explorer.exe"),
               _T(" "),
               _T("Hovered2"),
               _T("File Explorer"),
               0
             },
             {
-              _T("C:\\Windows\\system32\\notepad.exe"),
+              _T("%SystemRoot%\\system32\\notepad.exe"),
               _T(" "),
               _T("Hovered3"),
               _T("Notepad"),
               0
             },
             {
-              _T("C:\\Windows\\regedit.exe"),
+              _T("%SystemRoot%\\regedit.exe"),
               _T(" "),
               _T("Hovered4"),
               _T("Registry Editor"),
@@ -131,7 +126,7 @@ void _tmain(void)
 
             // Won't work:
             // 1. Need to know it's a shell URI
-            // 2. Then use SHParseDisplayName
+            // 2. Then use SHParseDisplayName or whatever
             //{
             //  _T("%SystemRoot%\\explorer.exe"),
             //  _T("/e,\"shell:Recent\CustomDestinations\""),
@@ -143,7 +138,7 @@ void _tmain(void)
             // But this will
             {
               _T("%SystemRoot%\\system32\\cmd.exe"),
-              _T("/c start explorer shell:Recent\\CustomDestinations"),
+              _T("/c explorer shell:Recent\\CustomDestinations"),
               _T("Open Custom Destinations in Explorer"),
               _T("Open Custom Destinations"),
               0
@@ -155,16 +150,17 @@ void _tmain(void)
                                        c_tasks[elm].szArgs,
                                        c_tasks[elm].szDescription,
                                        c_tasks[elm].szTitle,
+                                       (4 == elm) ? _T("%SystemRoot%\\explorer.exe") : NULL, // Make the "Open Custom Destinations" use the File Explorer icon
                                        c_tasks[elm].nIconIndex)))
           {
             ExitProcess(EXIT_FAILURE);
           }
         }
+      }
 
-        if (FAILED(hr = ICDL_CommitCategory(pcdl)))
-        {
-          ExitProcess(EXIT_FAILURE);
-        }
+      if (FAILED(hr = ICDL_CommitCategory(pcdl)))
+      {
+        ExitProcess(EXIT_FAILURE);
       }
 
       if (FAILED(hr = ICDL_CommitList(pcdl)))
@@ -173,6 +169,11 @@ void _tmain(void)
       }
 
       ICDL_Release(pcdl);
+    }
+
+    if (S_OK != SetProcessDpiAwareness(DPI_AWARENESS_PER_MONITOR_AWARE))
+    {
+      ExitProcess(EXIT_FAILURE);
     }
 
     SecureZeroMemory(&wcx, sizeof(wcx));
@@ -220,7 +221,7 @@ void _tmain(void)
 
     // Win11 24H2: Default theming just tosses NONCLIENT operability out the window--
     // This is needed for maximize/restore down to __just work__, just shameful
-    SetWindowTheme(hwnd, L"WINDOW", L"");
+    SetWindowTheme(hwnd, L"WINDOW", NULL);
 
     UpdateWindow(hwnd);
     ShowWindow(hwnd, SW_SHOWDEFAULT);
@@ -334,20 +335,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
   }
     
   switch (uMsg) {
-  case WM_COMMAND:
-  {
-    int wmId = LOWORD(wParam);
-    // Parse the menu selections:
-    switch (wmId)
-    {
-    case IDM_EXIT:
-      DestroyWindow(hwnd);
-      break;
-    default:
-      return DefWindowProc(hwnd, uMsg, wParam, lParam);
-    }
-    break;
-  }
   case WM_NCCREATE:
   {
     EnableDarkMode(hwnd);
