@@ -7,65 +7,80 @@
 #include <propsys.h>
 #include <propvarutil.h>
 #include <shlobj.h>
+#include <winbase.h>
 
 #pragma comment (lib, "Propsys")
 
+// Adding macros <suppress.h> _conveniently_ does not provide
 #define __WARNING_PADDING_ADDED_AFTER_DATA_MEMBER    4820
 #define __WARNING_SPECTRE_MITIGATION_FOR_MEMORY_LOAD 5045
 #pragma warning(disable:__WARNING_PADDING_ADDED_AFTER_DATA_MEMBER)    // 4820 Pad this bud
 #pragma warning(disable:__WARNING_SPECTRE_MITIGATION_FOR_MEMORY_LOAD) // 5045 Mitigate this bud
 
-#ifdef _UNICODE
-  #define VT_LPTSTR VT_LPWSTR
-  #define IShellLink_SetPath IShellLinkW_SetPath
-  #define IShellLink_SetArguments IShellLinkW_SetArguments
-  #define IShellLink_SetIconLocation IShellLinkW_SetIconLocation
-  #define IShellLink_SetDescription IShellLinkW_SetDescription
-  #define IShellLink_Release IShellLinkW_Release
-#elif defined _MBCS
-  #define VT_LPTSTR VT_LPSTR
-  #define IShellLink_SetPath IShellLinkA_SetPath
-  #define IShellLink_SetArguments IShellLinkA_SetArguments
-  #define IShellLink_SetIconLocation IShellLinkA_SetIconLocation
-  #define IShellLink_SetDescription IShellLinkA_SetDescription
-  #define IShellLink_Release IShellLinkA_Release
-#else
-  #error "Ensure a chosen character set in either _UNICODE or _MBCS"
-#endif
-
 #define CDLAPIPRIVATE(type) static __forceinline type __cdecl
 
-#define VALIDATE_RETURN_HRESULT(expr, hr)                                      \
-    {                                                                          \
+#define VALIDATE_RETURN_HRESULT(expr, hr, msg)                                 \
+    do {                                                                       \
         if (!(expr))                                                           \
         {                                                                      \
             return (hr);                                                       \
         }                                                                      \
-    }
+    } while(0)
 
-typedef struct TASK
+#define CDL_ANSI     (1)
+#define CDL_NOT_ANSI (0)
+
+typedef struct CTASKW
 {
-  LPCTSTR pszImage;
-  LPCTSTR pszArgs;
-  LPCTSTR pszDescription;
-  LPCTSTR pszTitle;
+  WCHAR wszImage[_MAX_ENV];
+  WCHAR wszArgs[_MAX_ENV];  // Don't assume how this makes its way to NtCreateProcess https://stackoverflow.com/a/28452546
+  WCHAR wszDescription[INFOTIPSIZE];
+  WCHAR wszTitle[INFOTIPSIZE];
   LONG_PTR nIconIndex;
-} TASK, *PTASK;
+} CTASKW, *PCTASKW;
+
+typedef struct TASKV
+{
+  LPCVOID pcvImage;
+  LPCVOID pcvArgs;
+  LPCVOID pcvDescription;
+  LPCVOID pcvTitle;
+  LONG_PTR nIconIndex;
+} TASKV, *PTASKV;
+
+typedef struct TASKW
+{
+  LPCWSTR pcwszImage;
+  LPCWSTR pcwszArgs;
+  LPCWSTR pcwszDescription;
+  LPCWSTR pcwszTitle;
+  LONG_PTR nIconIndex;
+} TASKW, *PTASKW;
+
+C_ASSERT(sizeof(TASKW) == sizeof(TASKV));
 
 struct CDL
 {
-  TCHAR szImageName[_MAX_ENV];
-  ICustomDestinationList* picdl;
-  IObjectArray* pri;
-  IObjectCollection* poc;
+  WCHAR wszImageName[_MAX_ENV];
+  ICustomDestinationList* pcdl;
+  IObjectArray* poaRemovedDestinations;
+  IObjectCollection* pocUserTask;
+  IObjectCollection* pocCategory;
   UINT cMaxSlots;
+  WCHAR wszCurrentCategory[60];
+  BOOL fInBeginList;
+  BOOL fInBeginCategory;
 };
 
 CDLAPIPRIVATE(void)    SafeRelease(IUnknown** ppInterfaceToRelease);
+CDLAPIPRIVATE(BOOL)    EnsurePointer(void* lp, UINT_PTR ucb);
+CDLAPIPRIVATE(BOOL)    IsSystemCategory(PCWSTR pcwszCategory);
 CDLAPIPRIVATE(HRESULT) Initialize(ICDL** ppThis);
 CDLAPIPRIVATE(HRESULT) BeginList(ICDL* pThis, PCWSTR pcwszAppId);
-CDLAPIPRIVATE(HRESULT) AddUserTask(ICDL* pThis, PTASK pTask);
+CDLAPIPRIVATE(HRESULT) BeginCategory(ICDL* pThis, LPCVOID pcvCustomCategory, BOOL fAnsi);
+CDLAPIPRIVATE(HRESULT) AddUserTask(ICDL* pThis, PTASKV pvTask, BOOL fAnsi);
 CDLAPIPRIVATE(HRESULT) AddSeparator(ICDL* pThis);
+CDLAPIPRIVATE(HRESULT) CommitCategory(ICDL* pThis);
 CDLAPIPRIVATE(HRESULT) CommitList(ICDL* pThis);
 
 CDLAPIPRIVATE(void) SafeRelease(IUnknown** ppInterfaceToRelease)
@@ -75,6 +90,46 @@ CDLAPIPRIVATE(void) SafeRelease(IUnknown** ppInterfaceToRelease)
       IUnknown_Release((*ppInterfaceToRelease));
       (*ppInterfaceToRelease) = NULL;
     }
+}
+
+// Three options:
+// 1). Use deprecated IsBadHugeReadPtr()/ IsBadHugeWritePtr, and open self up to certain uncaught SEH exceptions for things like page guards
+// 2). Use VirtualQuery, and tank kernel traps to consult the memory manager
+// 3). Roll our own userspace validation, leveraging optimizations-disabled idempotent memcpy->memset->memcpy (swap-zero-swap) via a temporary buffer
+CDLAPIPRIVATE(BOOL) EnsurePointer(void* lp, UINT_PTR ucb)
+{
+    if (IsBadHugeReadPtr(lp, ucb) || IsBadHugeWritePtr(lp, ucb))
+    {
+      return FALSE;
+    }
+
+    return TRUE;
+}
+
+CDLAPIPRIVATE(BOOL) IsSystemCategory(PCWSTR pcwszCategory)
+{
+    static PCWSTR c_ppcwszSystemCategories[] =
+    {
+      L"Frequent",
+      L"Recent",
+      L"Tasks",
+    };
+
+    SIZE_T nIndex;
+
+    for (nIndex = 0; nIndex < _countof(c_ppcwszSystemCategories); ++nIndex)
+    {
+        PCWSTR pcwszSystemCategory;
+
+        pcwszSystemCategory = c_ppcwszSystemCategories[nIndex];
+        
+        if (0 == _wcsicmp(pcwszCategory, pcwszSystemCategory))
+        {
+          return TRUE;
+        }
+    }
+
+    return FALSE;
 }
 
 CDLAPIPRIVATE(HRESULT) Initialize(ICDL** ppThis)
@@ -87,9 +142,9 @@ CDLAPIPRIVATE(HRESULT) Initialize(ICDL** ppThis)
     {
       DWORD cchImageName;
 
-      cchImageName = _countof((*ppThis)->szImageName);
+      cchImageName = _countof((*ppThis)->wszImageName);
 
-      if (FAILED(hr = QueryFullProcessImageName(GetCurrentProcess(), 0, (*ppThis)->szImageName, &cchImageName) ? S_OK : E_FAIL))
+      if (FAILED(hr = QueryFullProcessImageNameW(GetCurrentProcess(), 0, (*ppThis)->wszImageName, &cchImageName) ? S_OK : E_FAIL))
       {
         GlobalFree((*ppThis));
       }
@@ -102,76 +157,153 @@ CDLAPIPRIVATE(HRESULT) BeginList(ICDL* pThis, PCWSTR pcwszAppId)
 {
     HRESULT hr;
 
-    if (SUCCEEDED(hr = CoCreateInstance(&CLSID_DestinationList, NULL, CLSCTX_INPROC_SERVER, &IID_ICustomDestinationList, &pThis->picdl)))
+    if (SUCCEEDED(hr = CoCreateInstance(&CLSID_DestinationList, NULL, CLSCTX_INPROC_SERVER, &IID_ICustomDestinationList, &pThis->pcdl)))
     {
-      if (SUCCEEDED(hr = CoCreateInstance(&CLSID_EnumerableObjectCollection, NULL, CLSCTX_INPROC_SERVER, &IID_IObjectCollection, &pThis->poc)))
+      if (SUCCEEDED(hr = CoCreateInstance(&CLSID_EnumerableObjectCollection, NULL, CLSCTX_INPROC_SERVER, &IID_IObjectCollection, &pThis->pocUserTask)))
       {
-        if (SUCCEEDED(hr = ICustomDestinationList_SetAppID(pThis->picdl, pcwszAppId)))
+        if (SUCCEEDED(hr = ICustomDestinationList_SetAppID(pThis->pcdl, pcwszAppId)))
         {
-          hr = ICustomDestinationList_BeginList(pThis->picdl, &pThis->cMaxSlots, &IID_IObjectArray, &pThis->pri);
+          if (SUCCEEDED(hr = ICustomDestinationList_BeginList(pThis->pcdl, &pThis->cMaxSlots, &IID_IObjectArray, &pThis->poaRemovedDestinations)))
+          {
+            pThis->fInBeginList = TRUE;
+          }
         }
       }
     }
 
     if (FAILED(hr))
     {
-      SafeRelease((IUnknown**)&pThis->pri);
-      SafeRelease((IUnknown**)&pThis->poc);
-      SafeRelease((IUnknown**)&pThis->picdl);
+      SafeRelease((IUnknown**)&pThis->poaRemovedDestinations);
+      SafeRelease((IUnknown**)&pThis->pocUserTask);
+      SafeRelease((IUnknown**)&pThis->pcdl);
     }
 
     return hr;
 }
 
-CDLAPIPRIVATE(HRESULT) AddUserTask(ICDL* pThis, PTASK pTask)
+CDLAPIPRIVATE(HRESULT) BeginCategory(ICDL* pThis, LPCVOID pcvCustomCategory, BOOL fAnsi)
 {
     HRESULT hr;
-    IShellLink* psl;
+    LPCWSTR lpcwszCustomCategory;
+    WCHAR   wszFromAnsiCustomCategory[60];
+    SIZE_T  cbCustomCategory;
 
-    if (SUCCEEDED(hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLink, &psl)))
+    VALIDATE_RETURN_HRESULT(EnsurePointer(pThis, sizeof(ICDL)), E_POINTER, "ICDL* pointer is invalid");
+    VALIDATE_RETURN_HRESULT(pThis->fInBeginList, E_UNEXPECTED, "Must be currently creating a jump list");
+    VALIDATE_RETURN_HRESULT(!pThis->fInBeginCategory, E_UNEXPECTED, "Must not be currently creating a custom category");
+    VALIDATE_RETURN_HRESULT(pcvCustomCategory, E_INVALIDARG, "Must pass a valid pointer to category name");
+    
+    if (fAnsi)
+    {
+      MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pcvCustomCategory, -1, wszFromAnsiCustomCategory, (int)_countof(wszFromAnsiCustomCategory));
+
+      lpcwszCustomCategory = &wszFromAnsiCustomCategory[0];
+    }
+    else
+    {
+      lpcwszCustomCategory = (LPCWSTR)pcvCustomCategory;
+    }
+
+    cbCustomCategory = sizeof(WCHAR) * (wcsnlen(lpcwszCustomCategory, _countof(wszFromAnsiCustomCategory) - 1) + 1);
+
+    if (SUCCEEDED(hr = !IsSystemCategory(lpcwszCustomCategory) ? S_OK : E_INVALIDARG))
+    {
+      if (SUCCEEDED(hr = CoCreateInstance(&CLSID_EnumerableObjectCollection, NULL, CLSCTX_INPROC_SERVER, &IID_IObjectCollection, &pThis->pocCategory)))
+      {
+        CopyMemory(pThis->wszCurrentCategory, lpcwszCustomCategory, cbCustomCategory);
+        
+        pThis->fInBeginCategory = TRUE;
+      }
+    }
+
+    return hr;
+}
+
+CDLAPIPRIVATE(HRESULT) AddUserTask(ICDL* pThis, PTASKV pvTask, BOOL fAnsi)
+{
+    HRESULT hr;
+    IShellLinkW* psl;
+
+    if (SUCCEEDED(hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, &psl)))
     {
       IPropertyStore* pps;
 
       if (SUCCEEDED(hr = IPropertyStore_QueryInterface(psl, &IID_IPropertyStore, &pps)))
       {
-        LPCTSTR pcszImage;
+        PTASKW  pwTask;
+        PCTASKW pwCTask;
+        LPCWSTR pcwszImage;
 
-        pcszImage = pTask->pszImage ? pTask->pszImage : pThis->szImageName;
+        pwCTask = NULL;
 
-        if (SUCCEEDED(hr = IShellLink_SetPath(psl, pcszImage)))
+        if (fAnsi)
         {
-          if (SUCCEEDED(hr = IShellLink_SetArguments(psl, pTask->pszArgs)))
+          pwCTask = CoTaskMemAlloc(sizeof(CTASKW));
+
+          if (SUCCEEDED(hr = pwCTask ? S_OK : E_OUTOFMEMORY))
           {
-            if (SUCCEEDED(hr = IShellLink_SetIconLocation(psl, pcszImage, (int)pTask->nIconIndex)))
+            MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pvTask->pcvImage, -1, pwCTask->wszImage, _countof(pwCTask->wszImage));
+            MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pvTask->pcvArgs, -1, pwCTask->wszArgs, _countof(pwCTask->wszArgs));
+            MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pvTask->pcvDescription, -1, pwCTask->wszDescription, _countof(pwCTask->wszDescription));
+            MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pvTask->pcvTitle, -1, pwCTask->wszTitle, _countof(pwCTask->wszTitle));
+            pvTask->pcvImage       = pwCTask->wszImage;
+            pvTask->pcvArgs        = pwCTask->wszArgs;
+            pvTask->pcvDescription = pwCTask->wszDescription;
+            pvTask->pcvTitle       = pwCTask->wszTitle;
+          }
+        }
+
+        pwTask = (PTASKW)pvTask;
+
+        if (SUCCEEDED(hr))
+        {
+          pcwszImage = pwTask->pcwszImage ? pwTask->pcwszImage : pThis->wszImageName;
+
+          if (SUCCEEDED(hr = IShellLinkW_SetPath(psl, pcwszImage)))
+          {
+            if (SUCCEEDED(hr = IShellLinkW_SetArguments(psl, pwTask->pcwszArgs)))
             {
-              if (SUCCEEDED(hr = IShellLink_SetDescription(psl, pTask->pszDescription)))
+              if (SUCCEEDED(hr = IShellLinkW_SetIconLocation(psl, pcwszImage, (int)pwTask->nIconIndex)))
               {
-                PROPVARIANT pv;
-                SIZE_T cbTitle;
-
-                PropVariantInit(&pv);
-                cbTitle = (_tcslen(pTask->pszTitle) + 1) * sizeof(TCHAR);
-                V_UNION(&pv, pwszVal) = CoTaskMemAlloc(cbTitle);
-
-                if (SUCCEEDED(hr = V_UNION(&pv, pwszVal) ? S_OK : E_OUTOFMEMORY))
+                if (SUCCEEDED(hr = IShellLinkW_SetDescription(psl, pwTask->pcwszDescription)))
                 {
-                  CopyMemory(V_UNION(&pv, pwszVal), pTask->pszTitle, cbTitle);
-                  V_VT(&pv) = VT_LPTSTR;
+                  PROPVARIANT pv;
+                  SIZE_T cbTitle;
 
-                  if (SUCCEEDED(hr = IPropertyStore_SetValue(pps, &PKEY_Title, &pv)))
+                  PropVariantInit(&pv);
+                  cbTitle = sizeof(WCHAR) * (wcslen(pwTask->pcwszTitle) + 1);
+                  V_UNION(&pv, pwszVal) = CoTaskMemAlloc(cbTitle);
+
+                  if (SUCCEEDED(hr = V_UNION(&pv, pwszVal) ? S_OK : E_OUTOFMEMORY))
                   {
-                    hr = IPropertyStore_Commit(pps);
-                    PropVariantClear(&pv);
+                    CopyMemory(V_UNION(&pv, pwszVal), pwTask->pcwszTitle, cbTitle);
+                    V_VT(&pv) = VT_LPWSTR;
 
-                    if (SUCCEEDED(hr))
+                    if (SUCCEEDED(hr = IPropertyStore_SetValue(pps, &PKEY_Title, &pv)))
                     {
-                      hr = IObjectCollection_AddObject(pThis->poc, (IUnknown*)psl);
+                      hr = IPropertyStore_Commit(pps);
+                      PropVariantClear(&pv);
+
+                      if (SUCCEEDED(hr))
+                      {
+                        IObjectCollection* poc;
+
+                        poc = (pThis->fInBeginCategory) ? pThis->pocCategory : pThis->pocUserTask;
+
+                        hr = IObjectCollection_AddObject(poc, (IUnknown*)psl);
+                      }
                     }
                   }
                 }
               }
             }
           }
+        }
+
+        if (pwCTask)
+        {
+          CoTaskMemFree(pwCTask);
+          pwCTask = NULL;
         }
 
         SafeRelease((IUnknown**)&pps);
@@ -186,9 +318,9 @@ CDLAPIPRIVATE(HRESULT) AddUserTask(ICDL* pThis, PTASK pTask)
 CDLAPIPRIVATE(HRESULT) AddSeparator(ICDL* pThis)
 {
     HRESULT hr;
-    IShellLink* psl;
+    IShellLinkW* psl;
 
-    if (SUCCEEDED(hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLink, &psl)))
+    if (SUCCEEDED(hr = CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkW, &psl)))
     {
       IPropertyStore* pps;
 
@@ -207,7 +339,7 @@ CDLAPIPRIVATE(HRESULT) AddSeparator(ICDL* pThis)
 
           if (SUCCEEDED(hr))
           {
-            hr = IObjectCollection_AddObject(pThis->poc, (IUnknown*)psl);
+            hr = IObjectCollection_AddObject(pThis->pocUserTask, (IUnknown*)psl);
           }
         }
       }
@@ -220,16 +352,44 @@ CDLAPIPRIVATE(HRESULT) AddSeparator(ICDL* pThis)
     return hr;
 }
 
+CDLAPIPRIVATE(HRESULT) CommitCategory(ICDL* pThis)
+{
+    HRESULT hr;
+    IObjectArray* poa;
+
+    if (SUCCEEDED(hr = IObjectArray_QueryInterface(pThis->pocCategory, &IID_IObjectArray, &poa)))
+    {
+      if (SUCCEEDED(hr = ICustomDestinationList_AppendCategory(pThis->pcdl, pThis->wszCurrentCategory, poa)))
+      {
+          pThis->wszCurrentCategory[0] = 0;
+          pThis->fInBeginCategory = FALSE;
+
+          SafeRelease((IUnknown**)&pThis->pocCategory);
+      }
+    }
+
+    SafeRelease((IUnknown**)&poa);
+
+    return hr;
+}
+
 CDLAPIPRIVATE(HRESULT) CommitList(ICDL* pThis)
 {
     HRESULT hr;
     IObjectArray* poa;
 
-    if (SUCCEEDED(hr = IObjectArray_QueryInterface(pThis->poc, &IID_IObjectArray, &poa)))
+    if (SUCCEEDED(hr = IObjectArray_QueryInterface(pThis->pocUserTask, &IID_IObjectArray, &poa)))
     {
-      if (SUCCEEDED(hr = ICustomDestinationList_AddUserTasks(pThis->picdl, poa)))
+      UINT cObjects;
+
+      if (SUCCEEDED(hr = IObjectArray_GetCount(pThis->pocUserTask, &cObjects)))
       {
-        hr = ICustomDestinationList_CommitList(pThis->picdl);
+        // Only need to _AddUserTasks if there are some to add
+
+        if ((0 == cObjects) || SUCCEEDED(hr = ICustomDestinationList_AddUserTasks(pThis->pcdl, poa))) 
+        {
+          hr = ICustomDestinationList_CommitList(pThis->pcdl);
+        }
       }
     }
 
@@ -242,7 +402,7 @@ CDLAPI(HRESULT) ICDL_BeginList(LPCWSTR pcwszAppId, ICDL** ppThis)
 {
     HRESULT hr;
 
-    VALIDATE_RETURN_HRESULT(ppThis, E_POINTER)
+    VALIDATE_RETURN_HRESULT(ppThis, E_POINTER, "ICDL** pointer is invalid");
 
     if (SUCCEEDED(hr = Initialize(ppThis)))
     {
@@ -252,31 +412,71 @@ CDLAPI(HRESULT) ICDL_BeginList(LPCWSTR pcwszAppId, ICDL** ppThis)
     return hr;
 }
 
-CDLAPI(HRESULT) ICDL_AddTask(ICDL* pThis, LPCTSTR pcszImage, LPCTSTR pcszArgs, LPCTSTR pcszDescription, LPCTSTR pcszTitle, int nIconIndex)
+CDLAPI(HRESULT) ICDL_BeginCategoryA(ICDL* pThis, LPCSTR pcszCategory)
 {
-    TASK task;
+    return BeginCategory(pThis, pcszCategory, CDL_ANSI);
+}
 
-    VALIDATE_RETURN_HRESULT(pThis, E_POINTER)
+CDLAPI(HRESULT) ICDL_BeginCategoryW(ICDL* pThis, LPCWSTR pcwszCategory)
+{
+    return BeginCategory(pThis, pcwszCategory, CDL_NOT_ANSI);
+}
 
-    task.pszImage       = pcszImage;
-    task.pszArgs        = pcszArgs;
-    task.pszDescription = pcszDescription;
-    task.pszTitle       = pcszTitle;
-    task.nIconIndex     = nIconIndex;
+CDLAPI(HRESULT) ICDL_AddTaskA(ICDL* pThis, LPCSTR pcszImage, LPCSTR pcszArgs, LPCSTR pcszDescription, LPCSTR pcszTitle, int nIconIndex)
+{
+    TASKV vtask;
 
-    return AddUserTask(pThis, &task);
+    VALIDATE_RETURN_HRESULT(EnsurePointer(pThis, sizeof(ICDL)), E_POINTER, "ICDL* pointer is invalid");
+    VALIDATE_RETURN_HRESULT(pThis->fInBeginList, E_INVALIDARG, "Must be currently creating a jump list");
+
+    vtask.pcvImage       = pcszImage;
+    vtask.pcvArgs        = pcszArgs;
+    vtask.pcvDescription = pcszDescription;
+    vtask.pcvTitle       = pcszTitle;
+    vtask.nIconIndex     = nIconIndex;
+
+    return AddUserTask(pThis, &vtask, CDL_ANSI);
+}
+
+CDLAPI(HRESULT) ICDL_AddTaskW(ICDL* pThis, LPCWSTR pcwszImage, LPCWSTR pcwszArgs, LPCWSTR pcwszDescription, LPCWSTR pcwszTitle, int nIconIndex)
+{
+    TASKV vtask;
+
+    VALIDATE_RETURN_HRESULT(EnsurePointer(pThis, sizeof(ICDL)), E_POINTER, "ICDL* pointer is invalid");
+    VALIDATE_RETURN_HRESULT(pThis->fInBeginList, E_INVALIDARG, "Must be currently creating a jump list");
+
+    vtask.pcvImage       = pcwszImage;
+    vtask.pcvArgs        = pcwszArgs;
+    vtask.pcvDescription = pcwszDescription;
+    vtask.pcvTitle       = pcwszTitle;
+    vtask.nIconIndex     = nIconIndex;
+
+    return AddUserTask(pThis, &vtask, CDL_NOT_ANSI);
 }
 
 CDLAPI(HRESULT) ICDL_AddSeparator(ICDL* pThis)
 {
-    VALIDATE_RETURN_HRESULT(pThis, E_POINTER)
+    VALIDATE_RETURN_HRESULT(EnsurePointer(pThis, sizeof(ICDL)), E_POINTER, "ICDL* pointer is invalid");
+    VALIDATE_RETURN_HRESULT(pThis->fInBeginList, E_INVALIDARG, "Must be currently creating a jump list");
+    VALIDATE_RETURN_HRESULT(!pThis->fInBeginCategory, E_INVALIDARG, "Separators can't be added to custom categories");
 
     return AddSeparator(pThis);
 }
 
+CDLAPI(HRESULT) ICDL_CommitCategory(ICDL* pThis)
+{
+    VALIDATE_RETURN_HRESULT(EnsurePointer(pThis, sizeof(ICDL)), E_POINTER, "ICDL* pointer is invalid");
+    VALIDATE_RETURN_HRESULT(pThis->fInBeginList, E_INVALIDARG, "Must be currently creating a jump list");
+    VALIDATE_RETURN_HRESULT(pThis->fInBeginCategory, E_INVALIDARG, "Must be currently creating a custom category");
+    
+    return CommitCategory(pThis);
+}
+
 CDLAPI(HRESULT) ICDL_CommitList(ICDL* pThis)
 {
-    VALIDATE_RETURN_HRESULT(pThis, E_POINTER)
+    VALIDATE_RETURN_HRESULT(EnsurePointer(pThis, sizeof(ICDL)), E_POINTER, "ICDL* pointer is invalid");
+    VALIDATE_RETURN_HRESULT(pThis->fInBeginList, E_INVALIDARG, "Must be currently creating a jump list");
+    VALIDATE_RETURN_HRESULT(!pThis->fInBeginCategory, E_INVALIDARG, "Must not be currently creating a custom category");
 
     return CommitList(pThis);
 }
@@ -285,9 +485,10 @@ CDLAPI(VOID) ICDL_Release(ICDL* pThis)
 {
     if (pThis)
     {
-      SafeRelease((IUnknown**)&pThis->poc);
-      SafeRelease((IUnknown**)&pThis->pri);
-      SafeRelease((IUnknown**)&pThis->picdl);
+      SafeRelease((IUnknown**)&pThis->pocUserTask);
+      SafeRelease((IUnknown**)&pThis->pocCategory);
+      SafeRelease((IUnknown**)&pThis->poaRemovedDestinations);
+      SafeRelease((IUnknown**)&pThis->pcdl);
       GlobalFree(pThis);
     }
 }
