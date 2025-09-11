@@ -8,6 +8,7 @@
 #include <propvarutil.h>
 #include <shlobj.h>
 #include <winbase.h>
+#include <ShellApi.h>
 
 #pragma comment (lib, "Propsys")
 
@@ -126,13 +127,65 @@ CDLAPIPRIVATE(BOOL) IsSystemCategory(PCWSTR pcwszCategory)
 
         pcwszSystemCategory = c_ppcwszSystemCategories[nIndex];
         
-        if (0 == _wcsicmp(pcwszCategory, pcwszSystemCategory))
+        if (0 == lstrcmpiW(pcwszCategory, pcwszSystemCategory))
         {
           return TRUE;
         }
     }
 
     return FALSE;
+}
+
+CDLAPIPRIVATE(HRESULT) SetWindowAppUserModelID(HWND hwnd, LPCWSTR pcwszAppId)
+{
+    HRESULT hr;
+    IPropertyStore* pps;
+    SIZE_T cbTitle;
+
+    if (SUCCEEDED(hr = SHGetPropertyStoreForWindow(hwnd, &IID_IPropertyStore, &pps)))
+    {
+      PROPVARIANT pv;
+      
+      PropVariantInit(&pv);
+      cbTitle = sizeof(WCHAR) * (lstrlenW(pcwszAppId) + 1);
+      V_UNION(&pv, pwszVal) = CoTaskMemAlloc(cbTitle);
+      
+      if (SUCCEEDED(hr = V_UNION(&pv, pwszVal) ? S_OK : E_OUTOFMEMORY))
+      {
+        CopyMemory(V_UNION(&pv, pwszVal), pcwszAppId, cbTitle);
+        V_VT(&pv) = VT_LPWSTR;
+
+        hr = IPropertyStore_SetValue(pps, &PKEY_AppUserModel_ID, &pv);
+        PropVariantClear(&pv);
+      }
+
+      SafeRelease((IUnknown**)&pps);
+    }
+
+    return hr;
+}
+
+CDLAPIPRIVATE(HRESULT) ClearWindowAppUserModelID(HWND hwnd)
+{
+    HRESULT hr;
+    IPropertyStore* pps;
+
+    if (SUCCEEDED(hr = SHGetPropertyStoreForWindow(hwnd, &IID_IPropertyStore, &pps)))
+    {
+      PROPVARIANT pv;
+      PropVariantInit(&pv);
+
+      if (SUCCEEDED(hr = IPropertyStore_GetValue(pps, &PKEY_AppUserModel_ID, &pv)))
+      {
+        V_VT(&pv) = VT_EMPTY;
+
+        hr = IPropertyStore_SetValue(pps, &PKEY_AppUserModel_ID, &pv);
+      }
+
+      SafeRelease((IUnknown**)&pps);
+    }
+
+    return hr;
 }
 
 CDLAPIPRIVATE(HRESULT) Initialize(ICDL** ppThis)
@@ -207,7 +260,7 @@ CDLAPIPRIVATE(HRESULT) BeginCategory(ICDL* pThis, LPCVOID pcvCustomCategory, BOO
       lpcwszCustomCategory = (LPCWSTR)pcvCustomCategory;
     }
 
-    cbCustomCategory = sizeof(WCHAR) * (wcsnlen(lpcwszCustomCategory, _countof(wszFromAnsiCustomCategory) - 1) + 1);
+    cbCustomCategory = sizeof(WCHAR) * (lstrlenW(lpcwszCustomCategory) + 1);
 
     if (SUCCEEDED(hr = !IsSystemCategory(lpcwszCustomCategory) ? S_OK : E_INVALIDARG))
     {
@@ -281,7 +334,7 @@ CDLAPIPRIVATE(HRESULT) AddUserTask(ICDL* pThis, PTASKV pvTask, BOOL fAnsi)
                   SIZE_T cbTitle;
 
                   PropVariantInit(&pv);
-                  cbTitle = sizeof(WCHAR) * (wcslen(pwTask->pcwszTitle) + 1);
+                  cbTitle = sizeof(WCHAR) * (lstrlenW(pwTask->pcwszTitle) + 1);
                   V_UNION(&pv, pwszVal) = CoTaskMemAlloc(cbTitle);
 
                   if (SUCCEEDED(hr = V_UNION(&pv, pwszVal) ? S_OK : E_OUTOFMEMORY))
@@ -396,7 +449,7 @@ CDLAPIPRIVATE(HRESULT) CommitList(ICDL* pThis)
       {
         // Only need to _AddUserTasks if there are some to add
 
-        if ((0 == cObjects) || SUCCEEDED(hr = ICustomDestinationList_AddUserTasks(pThis->pcdl, poa))) 
+        if ((0 == cObjects) || SUCCEEDED(hr = ICustomDestinationList_AddUserTasks(pThis->pcdl, poa)))
         {
           hr = ICustomDestinationList_CommitList(pThis->pcdl);
         }
@@ -406,6 +459,21 @@ CDLAPIPRIVATE(HRESULT) CommitList(ICDL* pThis)
     SafeRelease((IUnknown**)&poa);
 
     return hr;
+}
+
+CDLAPI(HRESULT) ICDL_SetWindowAppUserModelID(HWND hwnd, LPCWSTR pcwszAppId)
+{
+    VALIDATE_RETURN_HRESULT(hwnd, E_POINTER, "HWND is invalid");
+    VALIDATE_RETURN_HRESULT(pcwszAppId, E_POINTER, "AppID is invalid");
+
+    return SetWindowAppUserModelID(hwnd, pcwszAppId);
+}
+
+CDLAPI(HRESULT) ICDL_ClearWindowAppUserModelID(HWND hwnd)
+{
+    VALIDATE_RETURN_HRESULT(hwnd, E_POINTER, "HWND is invalid");
+    
+    return ClearWindowAppUserModelID(hwnd);
 }
 
 CDLAPI(HRESULT) ICDL_BeginList(LPCWSTR pcwszAppId, ICDL** ppThis)
@@ -493,7 +561,7 @@ CDLAPI(HRESULT) ICDL_CommitList(ICDL* pThis)
     return CommitList(pThis);
 }
 
-CDLAPI(VOID) ICDL_Release(ICDL* pThis)
+CDLAPI(void) ICDL_Release(ICDL* pThis)
 {
     if (pThis)
     {

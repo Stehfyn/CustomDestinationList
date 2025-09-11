@@ -46,6 +46,8 @@
 
 typedef struct CDL ICDL;
 
+CDLAPI(HRESULT) ICDL_SetWindowAppUserModelID(HWND hwnd, LPCWSTR pcwszAppId);
+CDLAPI(HRESULT) ICDL_ClearWindowAppUserModelID(HWND hwnd);
 CDLAPI(HRESULT) ICDL_BeginList(LPCWSTR pcwszAppId, ICDL** ppThis);
 CDLAPI(HRESULT) ICDL_BeginCategoryA(ICDL* pThis, LPCSTR pcszCategory);
 CDLAPI(HRESULT) ICDL_BeginCategoryW(ICDL* pThis, LPCWSTR pcwszCategory);
@@ -54,7 +56,7 @@ CDLAPI(HRESULT) ICDL_AddTaskW(ICDL* pThis, LPCWSTR pcwszImage, LPCWSTR pcwszArgs
 CDLAPI(HRESULT) ICDL_AddSeparator(ICDL* pThis);
 CDLAPI(HRESULT) ICDL_CommitCategory(ICDL* pThis);
 CDLAPI(HRESULT) ICDL_CommitList(ICDL* pThis); // C:\%UserProfile%\AppData\Roaming\Microsoft\Windows\Recent\CustomDestinations
-CDLAPI(VOID)    ICDL_Release(ICDL* pThis);
+CDLAPI(void)    ICDL_Release(ICDL* pThis);
 
 #ifdef _UNICODE
   #define ICDL_BeginCategory ICDL_BeginCategoryW

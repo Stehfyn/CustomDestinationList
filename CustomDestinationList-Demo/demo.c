@@ -11,7 +11,8 @@
 #include <Vssym32.h>
 #include "resource.h"
 #include <ShellScalingApi.h>
-
+#include <propkey.h>
+#include <propsys.h>
 #pragma comment (lib, "dwmapi")
 #pragma comment (lib, "Shcore")
 #pragma comment (lib, "UxTheme")
@@ -62,13 +63,62 @@ void _tmain(void)
       ExitProcess(EXIT_FAILURE);
     }
 
-    if (FAILED(hr = SetCurrentProcessExplicitAppUserModelID(L"CustomDestinationList-Demo")))
+    if (FAILED(SetProcessDpiAwareness(DPI_AWARENESS_PER_MONITOR_AWARE)))
     {
       ExitProcess(EXIT_FAILURE);
     }
 
-    pszAppId = NULL;
-    if (FAILED(hr = GetCurrentProcessExplicitAppUserModelID(&pszAppId)))
+    SecureZeroMemory(&wcx, sizeof(wcx));
+    wcx.cbSize        = sizeof(wcx);
+    wcx.style         = CS_BYTEALIGNCLIENT | CS_BYTEALIGNWINDOW;
+    wcx.lpfnWndProc   = WndProc;
+    wcx.hInstance     = (HINSTANCE)&__ImageBase;
+    wcx.hbrBackground = CreateSolidBrush(RGB(43, 43, 43));
+    wcx.hCursor       = LoadCursor(NULL, IDC_ARROW);
+    wcx.lpszClassName = _T("CustomDestinationList-DemoWndClass");
+    wcx.hIcon         = LoadIcon((HINSTANCE)&__ImageBase, MAKEINTRESOURCE(IDI_ICON1));
+    szClassAtom       = (LPCTSTR)RegisterClassEx(&wcx);
+
+    if (!szClassAtom)
+    {
+      ExitProcess(EXIT_FAILURE);
+    }
+
+    GetStartupInfo(&si);
+    GetStartupRect(640, 480, &rc);
+
+    if (!(STARTF_USEPOSITION & si.dwFlags) && !si.hStdOutput)
+    {
+      hwnd = CreateWindowEx(
+        WS_EX_APPWINDOW | WS_EX_COMPOSITED,
+        szClassAtom, _T("CustomDestinationList-Demo"),
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        CW_USEDEFAULT, CW_USEDEFAULT, RECTWIDTH(rc), RECTHEIGHT(rc),
+        HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
+    }
+    else
+    {
+      hwnd = CreateWindowEx(
+        WS_EX_APPWINDOW | WS_EX_COMPOSITED,
+        szClassAtom, _T("CustomDestinationList-Demo"), 
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        rc.left, rc.top, RECTWIDTH(rc), RECTHEIGHT(rc),
+        HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
+    }
+
+    if (!hwnd)
+    {
+      ExitProcess(EXIT_FAILURE);
+    }
+
+    // Win11 24H2: Default theming just tosses NONCLIENT operability out the window--
+    // This is needed for maximize/restore down to __just work__, just shameful
+    SetWindowTheme(hwnd, L"DarkMode_Explorer", NULL);
+
+    UpdateWindow(hwnd);
+    ShowWindow(hwnd, SW_SHOWDEFAULT);
+
+    if (FAILED(hr = ICDL_SetWindowAppUserModelID(hwnd, pszAppId = L"CustomDestinationList-Demo")))
     {
       ExitProcess(EXIT_FAILURE);
     }
@@ -76,8 +126,6 @@ void _tmain(void)
     pcdl = NULL;
     if (SUCCEEDED(hr = ICDL_BeginList(pszAppId, &pcdl)))
     {
-      CoTaskMemFree(pszAppId);
-
       if (SUCCEEDED(hr = ICDL_BeginCategory(pcdl, _T("Quick Launch"))))
       {
         int elm;
@@ -98,7 +146,7 @@ void _tmain(void)
             {
               _T("%SystemRoot%\\system32\\cmd.exe"),
               _T(" "),
-              _T("Hovered1"),
+              _T("Hovered69"),
               _T("Command Prompt"),
               0
             },
@@ -170,61 +218,6 @@ void _tmain(void)
 
       ICDL_Release(pcdl);
     }
-
-    if (S_OK != SetProcessDpiAwareness(DPI_AWARENESS_PER_MONITOR_AWARE))
-    {
-      ExitProcess(EXIT_FAILURE);
-    }
-
-    SecureZeroMemory(&wcx, sizeof(wcx));
-    wcx.cbSize        = sizeof(wcx);
-    wcx.style         = CS_BYTEALIGNCLIENT | CS_BYTEALIGNWINDOW;
-    wcx.lpfnWndProc   = WndProc;
-    wcx.hInstance     = (HINSTANCE)&__ImageBase;
-    wcx.hbrBackground = CreateSolidBrush(RGB(43, 43, 43));
-    wcx.hCursor       = LoadCursor(NULL, IDC_ARROW);
-    wcx.lpszClassName = _T("CustomDestinationList-DemoWndClass");
-    wcx.hIcon         = LoadIcon((HINSTANCE)&__ImageBase, MAKEINTRESOURCE(IDI_ICON1));
-    szClassAtom       = (LPCTSTR)RegisterClassEx(&wcx);
-
-    if (!szClassAtom)
-    {
-      ExitProcess(EXIT_FAILURE);
-    }
-
-    GetStartupInfo(&si);
-    GetStartupRect(640, 480, &rc);
-
-    if (!(STARTF_USEPOSITION & si.dwFlags) && !si.hStdOutput)
-    {
-      hwnd = CreateWindowEx(
-        WS_EX_APPWINDOW | WS_EX_COMPOSITED,
-        szClassAtom, _T("CustomDestinationList-Demo"),
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT, RECTWIDTH(rc), RECTHEIGHT(rc),
-        HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
-    }
-    else
-    {
-      hwnd = CreateWindowEx(
-        WS_EX_APPWINDOW | WS_EX_COMPOSITED,
-        szClassAtom, _T("CustomDestinationList-Demo"), 
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        rc.left, rc.top, RECTWIDTH(rc), RECTHEIGHT(rc),
-        HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
-    }
-
-    if (!hwnd)
-    {
-      ExitProcess(EXIT_FAILURE);
-    }
-
-    // Win11 24H2: Default theming just tosses NONCLIENT operability out the window--
-    // This is needed for maximize/restore down to __just work__, just shameful
-    SetWindowTheme(hwnd, L"WINDOW", NULL);
-
-    UpdateWindow(hwnd);
-    ShowWindow(hwnd, SW_SHOWDEFAULT);
 
     fQuit = FALSE;
 
@@ -341,6 +334,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     break;
   }
   case WM_DESTROY:
+    ICDL_ClearWindowAppUserModelID(hwnd);
     PostQuitMessage(0);
     return 0;
   default:
