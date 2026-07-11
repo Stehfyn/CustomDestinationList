@@ -561,7 +561,7 @@ static void MenuBarPaintSeam(HWND hwnd, const MENUBAR_PALETTE* pPalette)
 
     rcLine        = rcClient;
     rcLine.bottom = rcLine.top;
-    rcLine.top    = rcLine.top - 1;
+    rcLine.top    = rcLine.top - 2;  // the frame's menu/client separator is 2px; a 1px cover leaves half
     ThemePaintSolidColor(hdc, &rcLine, pPalette->clrBar);
     ReleaseDC(hwnd, hdc);
 }
@@ -695,20 +695,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     break;
 
   case WM_UAHDRAWMENU:
-    MenuBarPalette(g_fDark, &pal);
+    // Owner-draw the bar dark ONLY in dark mode. In light mode fall through to DefWindowProc, which
+    // renders the native Win10 aero menu bar -- the canonical light look (correct aero blue hover).
+    if (!(g_fDark && (0 != g_policy))) { break; }
+    MenuBarPalette(TRUE, &pal);
     MenuBarOnDrawMenu(hwnd, (const UAHMENU*)lParam, &pal);
     return TRUE;
 
   case WM_UAHDRAWMENUITEM:
-    MenuBarPalette(g_fDark, &pal);
+    if (!(g_fDark && (0 != g_policy))) { break; }
+    MenuBarPalette(TRUE, &pal);
     MenuBarOnDrawMenuItem(hwnd, (const UAHDRAWMENUITEM*)lParam, &pal);
     return TRUE;
 
   case WM_NCACTIVATE:
   case WM_NCPAINT:
-    // Let the standard frame render, then hide its light 1px menu/client seam.
+    // Let the standard frame render, then paint over the 1px separator it draws between the menu bar
+    // and the client -- in BOTH themes, using the current bar color (dark fill in dark mode,
+    // COLOR_WINDOW in light mode) -- so no line shows in either theme.
     lResult = DefWindowProc(hwnd, uMsg, wParam, lParam);
-    MenuBarPalette(g_fDark, &pal);
+    MenuBarPalette(g_fDark && (0 != g_policy), &pal);
     MenuBarPaintSeam(hwnd, &pal);
     return lResult;
 
@@ -723,9 +729,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
   case WM_SETTINGCHANGE:
     // The shell broadcasts "ImmersiveColorSet" when the user flips the system light/dark setting.
     // This is an ANSI (MultiByte) window, so USER32 delivers lParam as an ANSI string -- compare with
-    // the TCHAR-mapped lstrcmpi/_T (NOT lstrcmpiW/L"...", which would read the ANSI bytes as wide and
-    // never match, silently dropping every theme change). Defer the re-read (coalesced) to the next
-    // loop turn so it runs after the broadcast returns.
+    // the TCHAR-mapped lstrcmpi/TEXT() (NOT lstrcmpiW/L"...", which would read the ANSI bytes as wide
+    // and never match, silently dropping every theme change). Defer the re-read (coalesced) to the
+    // next loop turn so it runs after the broadcast returns.
     if (lParam && (0 == lstrcmpi((LPCTSTR)lParam, TEXT("ImmersiveColorSet"))) && !g_fThemeChangePending)
     {
       g_fThemeChangePending = TRUE;

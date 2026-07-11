@@ -10,12 +10,14 @@
 #define IDI_SMALL                       108
 #define IDC_WIN32CUSTOMMENUBARAEROTHEME 109
 #define IDR_MAINFRAME                   128
-#define ID_RIGHT_ONE                    32771
-#define ID_RIGHT_TWO                    32772
-#define ID_GRAYED                       32773
-#define ID_DISABLED                     32774
-#define ID_ANOTHER_ONE                  32775
-#define ID_ANOTHER_TWO                  32776
+#define IDM_NEW                         32771
+#define IDM_OPEN                        32772
+#define IDM_SAVE                        32773
+#define IDM_UNDO                        32774
+#define IDM_CUT                         32775
+#define IDM_COPY                        32776
+#define IDM_PASTE                       32777
+#define IDM_STATUSBAR                   32778
 #define IDC_STATIC                      -1
 // Next default values for new objects
 // 
