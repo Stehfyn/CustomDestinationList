@@ -422,13 +422,15 @@ CDLAPIPRIVATE(HRESULT) CommitCategory(ICDL* pThis)
 
     if (SUCCEEDED(hr = IObjectArray_QueryInterface(pThis->pocCategory, &IID_IObjectArray, &poa)))
     {
-      if (SUCCEEDED(hr = ICustomDestinationList_AppendCategory(pThis->pcdl, pThis->wszCurrentCategory, poa)))
-      {
-          pThis->wszCurrentCategory[0] = 0;
-          pThis->fInBeginCategory = FALSE;
+      hr = ICustomDestinationList_AppendCategory(pThis->pcdl, pThis->wszCurrentCategory, poa);
 
-          SafeRelease((IUnknown**)&pThis->pocCategory);
-      }
+      // Tear the category state down on failure too: AppendCategory rejects the whole collection
+      // (e.g. E_ACCESSDENIED when the user has jump-list tracking disabled) and there is no way to
+      // re-commit it, so keeping fInBeginCategory set would only wedge ICDL_CommitList afterward.
+      pThis->wszCurrentCategory[0] = 0;
+      pThis->fInBeginCategory = FALSE;
+
+      SafeRelease((IUnknown**)&pThis->pocCategory);
     }
 
     SafeRelease((IUnknown**)&poa);

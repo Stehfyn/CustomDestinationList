@@ -226,11 +226,14 @@ void _tmain(void)
             ExitProcess(EXIT_FAILURE);
           }
         }
-      }
 
-      if (FAILED(hr = ICDL_CommitCategory(pcdl)))
-      {
-        ExitProcess(EXIT_FAILURE);
+        // E_ACCESSDENIED here means the user has "Show recently opened items in Start, Jump Lists,
+        // and File Explorer" turned off (Start_TrackDocs = 0): the shell refuses every custom
+        // category. Not fatal -- drop the category and still publish the Tasks list below.
+        if (FAILED(hr = ICDL_CommitCategory(pcdl)) && (E_ACCESSDENIED != hr))
+        {
+          ExitProcess(EXIT_FAILURE);
+        }
       }
 
       if (FAILED(hr = ICDL_CommitList(pcdl)))
