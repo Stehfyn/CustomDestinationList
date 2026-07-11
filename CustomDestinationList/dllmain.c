@@ -424,9 +424,41 @@ CDLAPIPRIVATE(HRESULT) CommitCategory(ICDL* pThis)
     {
       hr = ICustomDestinationList_AppendCategory(pThis->pcdl, pThis->wszCurrentCategory, poa);
 
+      // Privacy fallback: E_ACCESSDENIED means the user has "Show recently opened items in Start,
+      // Jump Lists, and File Explorer" turned off (Start_TrackDocs = 0), so the shell refuses every
+      // custom category. User tasks are exempt from that setting, so requeue the category's items
+      // onto the Tasks list instead of dropping them; S_FALSE tells the caller the items were
+      // demoted to tasks rather than appended under their category.
+      if (E_ACCESSDENIED == hr)
+      {
+        UINT cObjects;
+
+        if (SUCCEEDED(hr = IObjectArray_GetCount(poa, &cObjects)))
+        {
+          UINT nIndex;
+
+          for (nIndex = 0; SUCCEEDED(hr) && (nIndex < cObjects); ++nIndex)
+          {
+            IUnknown* punk;
+
+            if (SUCCEEDED(hr = IObjectArray_GetAt(poa, nIndex, &IID_IUnknown, &punk)))
+            {
+              hr = IObjectCollection_AddObject(pThis->pocUserTask, punk);
+
+              SafeRelease(&punk);
+            }
+          }
+
+          if (SUCCEEDED(hr))
+          {
+            hr = S_FALSE;
+          }
+        }
+      }
+
       // Tear the category state down on failure too: AppendCategory rejects the whole collection
-      // (e.g. E_ACCESSDENIED when the user has jump-list tracking disabled) and there is no way to
-      // re-commit it, so keeping fInBeginCategory set would only wedge ICDL_CommitList afterward.
+      // and there is no way to re-commit it, so keeping fInBeginCategory set would only wedge
+      // ICDL_CommitList afterward.
       pThis->wszCurrentCategory[0] = 0;
       pThis->fInBeginCategory = FALSE;
 
