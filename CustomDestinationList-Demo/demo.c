@@ -739,8 +739,8 @@ static void ThemeRefreshFromSystem(HWND hwnd)
 
 /* About box. Themed to match the main window: the title bar + control sub-theme via
    AboutDlgApplyTheme, and the dialog surface + static text via the WM_CTLCOLOR* hooks (the dialog
-   manager lets a DLGPROC return the brush directly for those). Light mode returns FALSE everywhere
-   -> stock dialog rendering. A system light/dark switch while the box is open is handled by
+   manager lets a DLGPROC return the brush directly for those). Light mode returns COLOR_WINDOW so
+   the dialog surface matches the main window's client. A system light/dark switch while open is handled by
    ThemeRefreshFromSystem, which re-dresses the dialog registered in g_hwndAbout. */
 static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
@@ -786,7 +786,11 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
             SetBkColor((HDC)wParam, DARK_BG);
             return (INT_PTR)g_hbrDark;
         }
-        break;
+        /* Light: the stock dialog brush is COLOR_3DFACE, but the main window's client paints
+           COLOR_WINDOW (WM_ERASEBKGND), so return that surface here to match. */
+        SetTextColor((HDC)wParam, GetSysColor(COLOR_WINDOWTEXT));
+        SetBkColor((HDC)wParam, GetSysColor(COLOR_WINDOW));
+        return (INT_PTR)GetSysColorBrush(COLOR_WINDOW);
 
     case WM_COMMAND:
         switch (LOWORD(wParam))
