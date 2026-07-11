@@ -38,6 +38,8 @@ static BOOL   g_fDark;                /* current effective dark mode (follows th
 static HBRUSH g_hbrDark;              /* cached dark client-background brush                            */
 static int    g_policy;               /* 0 = no app dark mode, 1 = Win10 1809, 2 = Win10 1903+ / Win11  */
 static BOOL   g_fThemeChangePending;  /* an ImmersiveColorSet broadcast is queued for deferred handling */
+static BOOL   g_fActiveItem;          /* light mode: a top-level menu item is hot/pressed              */
+static RECT   g_rcActiveItem;         /* ...its rect (window coords), so the seam can spare its bottom  */
 
 /* Private message: a system light/dark switch, re-read on the next message-loop turn (see WndProc). */
 #define WMAPP_THEMECHANGED (WM_APP + 1)
@@ -562,7 +564,23 @@ static void MenuBarPaintSeam(HWND hwnd, const MENUBAR_PALETTE* pPalette)
     rcLine        = rcClient;
     rcLine.bottom = rcLine.top;
     rcLine.top    = rcLine.top - 2;  // the frame's menu/client separator is 2px; a 1px cover leaves half
-    ThemePaintSolidColor(hdc, &rcLine, pPalette->clrBar);
+
+    // If a top-level item is hot/pressed (light mode), paint the seam in two parts so its x-range is
+    // left untouched -- the native aero box keeps its own bottom edge there, while the separator stays
+    // covered everywhere else. Full-width single line otherwise.
+    if (g_fActiveItem)
+    {
+        RECT rcLeft  = rcLine;
+        RECT rcRight = rcLine;
+        rcLeft.right = g_rcActiveItem.left;
+        rcRight.left = g_rcActiveItem.right;
+        if (rcLeft.right > rcLeft.left)   { ThemePaintSolidColor(hdc, &rcLeft, pPalette->clrBar); }
+        if (rcRight.right > rcRight.left) { ThemePaintSolidColor(hdc, &rcRight, pPalette->clrBar); }
+    }
+    else
+    {
+        ThemePaintSolidColor(hdc, &rcLine, pPalette->clrBar);
+    }
     ReleaseDC(hwnd, hdc);
 }
 
@@ -708,16 +726,34 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
   case WM_UAHDRAWMENU:
     // Owner-draw the bar dark ONLY in dark mode. In light mode fall through to DefWindowProc, which
     // renders the native Win10 aero menu bar -- the canonical light look (correct aero blue hover).
+    g_fActiveItem = FALSE;  // reset on a full bar repaint; hot item (if any) re-set below
     if (!(g_fDark && (0 != g_policy))) { break; }
     MenuBarPalette(TRUE, &pal);
     MenuBarOnDrawMenu(hwnd, (const UAHMENU*)lParam, &pal);
     return TRUE;
 
   case WM_UAHDRAWMENUITEM:
-    if (!(g_fDark && (0 != g_policy))) { break; }
-    MenuBarPalette(TRUE, &pal);
-    MenuBarOnDrawMenuItem(hwnd, (const UAHDRAWMENUITEM*)lParam, &pal);
-    return TRUE;
+    if (g_fDark && (0 != g_policy))
+    {
+      MenuBarPalette(TRUE, &pal);
+      MenuBarOnDrawMenuItem(hwnd, (const UAHDRAWMENUITEM*)lParam, &pal);
+      return TRUE;
+    }
+    // Light: let DefWindowProc draw the native aero box, but remember the hot/pressed item's rect so
+    // MenuBarPaintSeam can spare its bottom edge (the 2px seam would otherwise clip the box border).
+    {
+      const UAHDRAWMENUITEM* pmi = (const UAHDRAWMENUITEM*)lParam;
+      if (pmi->dis.itemState & (ODS_HOTLIGHT | ODS_SELECTED))
+      {
+        g_rcActiveItem = pmi->dis.rcItem;
+        g_fActiveItem  = TRUE;
+      }
+      else if (g_fActiveItem && EqualRect(&g_rcActiveItem, &pmi->dis.rcItem))
+      {
+        g_fActiveItem = FALSE;  // this item just went back to normal (hover-out)
+      }
+    }
+    break;
 
   case WM_NCACTIVATE:
   case WM_NCPAINT:
