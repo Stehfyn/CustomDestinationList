@@ -242,7 +242,6 @@ CDLAPIPRIVATE(HRESULT) BeginCategory(ICDL* pThis, LPCVOID pcvCustomCategory, BOO
     HRESULT hr;
     LPCWSTR lpcwszCustomCategory;
     WCHAR   wszFromAnsiCustomCategory[60];
-    SIZE_T  cbCustomCategory;
 
     VALIDATE_RETURN_HRESULT(EnsurePointer(pThis, sizeof(ICDL)), E_POINTER, "ICDL* pointer is invalid");
     VALIDATE_RETURN_HRESULT(pThis->fInBeginList, E_UNEXPECTED, "Must be currently creating a jump list");
@@ -251,7 +250,8 @@ CDLAPIPRIVATE(HRESULT) BeginCategory(ICDL* pThis, LPCVOID pcvCustomCategory, BOO
     
     if (fAnsi)
     {
-      MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pcvCustomCategory, -1, wszFromAnsiCustomCategory, (int)_countof(wszFromAnsiCustomCategory));
+      SecureZeroMemory(wszFromAnsiCustomCategory, sizeof(wszFromAnsiCustomCategory));
+      MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pcvCustomCategory, -1, wszFromAnsiCustomCategory, (int)_countof(wszFromAnsiCustomCategory) - 1);
 
       lpcwszCustomCategory = &wszFromAnsiCustomCategory[0];
     }
@@ -260,14 +260,12 @@ CDLAPIPRIVATE(HRESULT) BeginCategory(ICDL* pThis, LPCVOID pcvCustomCategory, BOO
       lpcwszCustomCategory = (LPCWSTR)pcvCustomCategory;
     }
 
-    cbCustomCategory = sizeof(WCHAR) * (lstrlenW(lpcwszCustomCategory) + 1);
-
     if (SUCCEEDED(hr = !IsSystemCategory(lpcwszCustomCategory) ? S_OK : E_INVALIDARG))
     {
       if (SUCCEEDED(hr = CoCreateInstance(&CLSID_EnumerableObjectCollection, NULL, CLSCTX_INPROC_SERVER, &IID_IObjectCollection, &pThis->pocCategory)))
       {
-        CopyMemory(pThis->wszCurrentCategory, lpcwszCustomCategory, cbCustomCategory);
-        
+        lstrcpynW(pThis->wszCurrentCategory, lpcwszCustomCategory, (int)_countof(pThis->wszCurrentCategory));
+
         pThis->fInBeginCategory = TRUE;
       }
     }
@@ -424,11 +422,6 @@ CDLAPIPRIVATE(HRESULT) CommitCategory(ICDL* pThis)
     {
       hr = ICustomDestinationList_AppendCategory(pThis->pcdl, pThis->wszCurrentCategory, poa);
 
-      // Privacy fallback: E_ACCESSDENIED means the user has "Show recently opened items in Start,
-      // Jump Lists, and File Explorer" turned off (Start_TrackDocs = 0), so the shell refuses every
-      // custom category. User tasks are exempt from that setting, so requeue the category's items
-      // onto the Tasks list instead of dropping them; S_FALSE tells the caller the items were
-      // demoted to tasks rather than appended under their category.
       if (E_ACCESSDENIED == hr)
       {
         UINT cObjects;
@@ -457,8 +450,8 @@ CDLAPIPRIVATE(HRESULT) CommitCategory(ICDL* pThis)
       }
 
       // Tear the category state down on failure too: AppendCategory rejects the whole collection
-      // and there is no way to re-commit it, so keeping fInBeginCategory set would only wedge
-      // ICDL_CommitList afterward.
+      // (e.g. E_ACCESSDENIED when the user has jump-list tracking disabled) and there is no way to
+      // re-commit it, so keeping fInBeginCategory set would only wedge ICDL_CommitList afterward.
       pThis->wszCurrentCategory[0] = 0;
       pThis->fInBeginCategory = FALSE;
 

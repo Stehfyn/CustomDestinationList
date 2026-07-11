@@ -227,10 +227,6 @@ void _tmain(void)
           }
         }
 
-        // If the user has "Show recently opened items in Start, Jump Lists, and File Explorer"
-        // turned off (Start_TrackDocs = 0), the shell refuses every custom category; the library
-        // falls back by re-adding the category's items as user tasks (exempt from that setting)
-        // and returns S_FALSE, so any FAILED hr here is a real error.
         if (FAILED(hr = ICDL_CommitCategory(pcdl)))
         {
           ExitProcess(EXIT_FAILURE);

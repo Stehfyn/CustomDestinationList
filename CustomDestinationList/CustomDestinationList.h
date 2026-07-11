@@ -54,7 +54,7 @@ CDLAPI(HRESULT) ICDL_BeginCategoryW(ICDL* pThis, LPCWSTR pcwszCategory);
 CDLAPI(HRESULT) ICDL_AddTaskA(ICDL* pThis, LPCSTR pcszImage, LPCSTR pcszArgs, LPCSTR pcszDescription, LPCSTR pcszTitle, LPCSTR pcszIconLocation, int nIconIndex);
 CDLAPI(HRESULT) ICDL_AddTaskW(ICDL* pThis, LPCWSTR pcwszImage, LPCWSTR pcwszArgs, LPCWSTR pcwszDescription, LPCWSTR pcwszTitle, LPCWSTR pcwszIconLocation, int nIconIndex);
 CDLAPI(HRESULT) ICDL_AddSeparator(ICDL* pThis);
-CDLAPI(HRESULT) ICDL_CommitCategory(ICDL* pThis); // S_FALSE: category refused (jump-list tracking disabled), items re-added as user tasks instead
+CDLAPI(HRESULT) ICDL_CommitCategory(ICDL* pThis);
 CDLAPI(HRESULT) ICDL_CommitList(ICDL* pThis); // C:\%UserProfile%\AppData\Roaming\Microsoft\Windows\Recent\CustomDestinations
 CDLAPI(void)    ICDL_Release(ICDL* pThis);
 
