@@ -404,7 +404,7 @@ typedef struct tagUAHMENUITEM
 typedef struct tagUAHDRAWMENUITEM { DRAWITEMSTRUCT dis; UAHMENU um; UAHMENUITEM umi; } UAHDRAWMENUITEM;
 
 /* ---- palette -------------------------------------------------------------------------------- */
-#define DARK_BG        RGB(32, 32, 32)
+#define DARK_BG        RGB(43, 43, 43)  // matches the system's dark title-bar color
 #define DARK_BG_HOT    RGB(64, 64, 64)
 #define DARK_BG_PUSHED RGB(80, 80, 80)
 #define DARK_TEXT      RGB(240, 240, 240)
