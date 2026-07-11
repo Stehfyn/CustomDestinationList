@@ -664,18 +664,29 @@ static void ThemeApplyWindow(HWND hwnd, BOOL fDark)
 static void ThemeRefreshFromSystem(HWND hwnd)
 {
     MENUBAR_PALETTE pal;
+    BOOL            fNew;
+
+    /* IDEMPOTENT: one system light/dark switch makes the shell re-broadcast ImmersiveColorSet several
+       times over ~1s. Re-running the whole retheme (frame change + menu redraw + FlushMenuThemes) on
+       each duplicate is what makes the menu text flicker. Read the (registry-truth) new value and bail
+       out unless it actually changed -- so exactly one repaint happens per real switch. */
+    fNew = ThemeSystemUsesDarkMode();
+    if (fNew == g_fDark)
+    {
+        return;
+    }
+    g_fDark = fNew;
 
     (void)DlgRefreshImmersiveColorPolicyState();
     (void)DlgFlushMenuThemes();
-    g_fDark = ThemeSystemUsesDarkMode();
 
     ThemeApplyWindow(hwnd, g_fDark);
-    ThemeCommitFrame(hwnd);  /* make uDWM recolor the caption to the new shade (see ThemeCommitFrame) */
-    /* Repaint client (WM_ERASEBKGND picks the new brush) and the non-client frame (fires WM_UAHDRAWMENU*
-       with the new palette), then redraw the menu band and repaint the seam over the fresh frame. */
-    RedrawWindow(hwnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+    ThemeCommitFrame(hwnd);  /* frame change: recolors the caption AND repaints the NC menu bar + seam */
+    /* Client only: coalesced invalidate (NOT RDW_UPDATENOW, which forces a synchronous extra paint each
+       message). WM_ERASEBKGND picks the new brush; the frame change above already repainted the bar. */
+    InvalidateRect(hwnd, NULL, TRUE);
     DrawMenuBar(hwnd);
-    MenuBarPalette(g_fDark, &pal);
+    MenuBarPalette(g_fDark && (0 != g_policy), &pal);
     MenuBarPaintSeam(hwnd, &pal);
 }
 
@@ -739,11 +750,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     }
     break;
 
-  case WM_THEMECHANGED:
-    // NOTE: our own SetWindowTheme (in ThemeApplyWindow) generates WM_THEMECHANGED, so this must NOT
-    // re-trigger a re-theme or it recurses forever. Just repaint the menu band.
-    DrawMenuBar(hwnd);
-    break;
+  // NOTE: WM_THEMECHANGED is deliberately NOT handled. Our own SetWindowTheme (in ThemeApplyWindow)
+  // raises it, and the system raises several during a switch; handling it (e.g. DrawMenuBar) adds
+  // redundant menu repaints -> flicker. The single ImmersiveColorSet path below drives the retheme.
 
   case WMAPP_THEMECHANGED:
     g_fThemeChangePending = FALSE;
