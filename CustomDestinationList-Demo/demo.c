@@ -28,6 +28,7 @@
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 static void GetStartupRect(int nWidth, int nHeight, LPRECT lprc);
 
 /* Dark-mode + custom-menu-bar state (defined with the theming helpers, below WndProc). */
@@ -40,6 +41,7 @@ static int    g_policy;               /* 0 = no app dark mode, 1 = Win10 1809, 2
 static BOOL   g_fThemeChangePending;  /* an ImmersiveColorSet broadcast is queued for deferred handling */
 static BOOL   g_fActiveItem;          /* light mode: a top-level menu item is hot/pressed              */
 static RECT   g_rcActiveItem;         /* ...its rect (window coords), so the seam can spare its bottom  */
+static HWND   g_hwndAbout;            /* live About box, so a system theme switch can re-dress it       */
 
 /* Private message: a system light/dark switch, re-read on the next message-loop turn (see WndProc). */
 #define WMAPP_THEMECHANGED (WM_APP + 1)
@@ -675,6 +677,26 @@ static void ThemeApplyWindow(HWND hwnd, BOOL fDark)
     (void)DlgDwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, &fEffective, sizeof(fEffective));
 }
 
+/* Dress (or re-dress) the About box for the given mode: title-bar frame + control sub-theme via
+   ThemeApplyWindow, the OK button's push-button sub-theme, then a full repaint so the WM_CTLCOLOR*
+   hooks in AboutDlgProc re-run with the new mode. */
+static void AboutDlgApplyTheme(HWND hDlg, BOOL fDark)
+{
+    HWND hwndOK;
+    BOOL fEffective;
+
+    fEffective = fDark && (0 != g_policy);
+    ThemeApplyWindow(hDlg, fDark);
+    hwndOK = GetDlgItem(hDlg, IDOK);
+    if (hwndOK)
+    {
+        (void)DlgAllowDarkModeForWindow(hwndOK, fEffective);
+        (void)DlgSetWindowTheme(hwndOK, fEffective ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    }
+    ThemeCommitFrame(hDlg);  /* make the caption pick up the immersive-dark attribute */
+    (void)RedrawWindow(hDlg, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
+}
+
 /* Re-read the live system theme and re-dress the whole window. Runs on the deferred WMAPP_THEMECHANGED,
    NOT inline on WM_SETTINGCHANGE: the shell broadcasts the change before it has committed the new value,
    so an immediate read races and returns the old setting. ShouldAppsUseDarkMode (ordinal 132) also reads
@@ -706,6 +728,83 @@ static void ThemeRefreshFromSystem(HWND hwnd)
     DrawMenuBar(hwnd);
     MenuBarPalette(g_fDark && (0 != g_policy), &pal);
     MenuBarPaintSeam(hwnd, &pal);
+
+    /* The About box is modal but the theme switch still lands here (its modal loop dispatches the
+       posted WMAPP_THEMECHANGED to this window) -- re-dress it too or it keeps the stale mode. */
+    if (g_hwndAbout)
+    {
+        AboutDlgApplyTheme(g_hwndAbout, g_fDark);
+    }
+}
+
+/* About box. Themed to match the main window: the title bar + control sub-theme via
+   AboutDlgApplyTheme, and the dialog surface + static text via the WM_CTLCOLOR* hooks (the dialog
+   manager lets a DLGPROC return the brush directly for those). Light mode returns FALSE everywhere
+   -> stock dialog rendering. A system light/dark switch while the box is open is handled by
+   ThemeRefreshFromSystem, which re-dresses the dialog registered in g_hwndAbout. */
+static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(lParam);
+
+    switch (uMsg)
+    {
+    case WM_INITDIALOG:
+    {
+        /* Center on the owner's window rect (the dialog manager only offsets from the owner's
+           client origin, so an off-center owner position would carry over). */
+        HWND hwndOwner;
+        RECT rcOwner;
+        RECT rcDlg;
+
+        hwndOwner = GetParent(hDlg);
+        if (!hwndOwner)
+        {
+            hwndOwner = GetDesktopWindow();
+        }
+        GetWindowRect(hwndOwner, &rcOwner);
+        GetWindowRect(hDlg, &rcDlg);
+        (void)SetWindowPos(hDlg, NULL,
+                           rcOwner.left + (LONG)(RECTWIDTH(rcOwner) - RECTWIDTH(rcDlg)) / 2,
+                           rcOwner.top + (LONG)(RECTHEIGHT(rcOwner) - RECTHEIGHT(rcDlg)) / 2,
+                           0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+        g_hwndAbout = hDlg;
+        AboutDlgApplyTheme(hDlg, g_fDark);
+        return TRUE;
+    }
+
+    case WM_DESTROY:
+        g_hwndAbout = NULL;
+        break;
+
+    case WM_CTLCOLORDLG:
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+        if (g_fDark && (0 != g_policy))
+        {
+            SetTextColor((HDC)wParam, DARK_TEXT);
+            SetBkColor((HDC)wParam, DARK_BG);
+            return (INT_PTR)g_hbrDark;
+        }
+        break;
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam))
+        {
+        case IDOK:
+        case IDCANCEL:
+            EndDialog(hDlg, LOWORD(wParam));
+            return TRUE;
+        default:
+            break;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return FALSE;
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -801,9 +900,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
       DestroyWindow(hwnd);
       return 0;
     case IDM_ABOUT:
-      MessageBoxW(hwnd,
-                  L"CustomDestinationList-Demo\n\nWin32 dark mode + owner-drawn custom menu bar.",
-                  L"About", MB_OK | MB_ICONINFORMATION);
+      DialogBox((HINSTANCE)&__ImageBase, MAKEINTRESOURCE(IDD_ABOUTBOX), hwnd, AboutDlgProc);
       return 0;
     default:
       break;
