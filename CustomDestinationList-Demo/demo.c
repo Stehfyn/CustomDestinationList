@@ -31,6 +31,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam);
 static void GetStartupRect(int nWidth, int nHeight, LPRECT lprc);
 
+typedef struct BACKDROPDIB
+{
+    HDC     hdc;
+    HBITMAP hbmp;
+    HGDIOBJ hbmpOld;
+    DWORD*  pvBits;
+    int     cx;
+    int     cy;
+} BACKDROPDIB;
+
 /* Dark-mode + custom-menu-bar state (defined with the theming helpers, below WndProc). */
 typedef struct THEMESTATE
 {
@@ -39,13 +49,17 @@ typedef struct THEMESTATE
     COLORREF clrDarkBg;
     int      policy;               /* 0 = no app dark mode, 1 = Win10 1809, 2 = Win10 1903+ / Win11  */
     BOOL     fWin11;
+    BOOL     fBackdrop;
     BOOL     fThemeChangePending;  /* an ImmersiveColorSet broadcast is queued for deferred handling */
     BOOL     fActiveItem;          /* light mode: a top-level menu item is hot/pressed              */
     RECT     rcActiveItem;         /* ...its rect (window coords), so the seam can spare its bottom  */
-    HWND     hwndAbout;            /* live About box, so a system theme switch can re-dress it       */
+    HWND        hwndAbout;         /* live About box, so a system theme switch can re-dress it       */
+    WNDPROC     pfnAboutOK;
+    BACKDROPDIB dibAboutOK;
 } THEMESTATE;
 static void ThemeInitProcess(THEMESTATE* pts);
-static void ThemeApplyWindow(HWND hwnd, const THEMESTATE* pts, BOOL fDark);
+static void ThemeApplyWindow(HWND hwnd, THEMESTATE* pts, BOOL fDark);
+static void ThemeExtendBackdrop(HWND hwnd, const THEMESTATE* pts);
 static void ThemeCommitFrame(HWND hwnd);
 
 /* Private message: a system light/dark switch, re-read on the next message-loop turn (see WndProc). */
@@ -323,6 +337,13 @@ void _tmain(void)
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
 #define DWMWA_USE_IMMERSIVE_DARK_MODE_OLD 19  /* Win10 1809 used attribute 19 before it settled on 20 */
+#ifndef DWMWA_SYSTEMBACKDROP_TYPE
+#define DWMWA_SYSTEMBACKDROP_TYPE 38
+#endif
+#ifndef DWMSBT_MAINWINDOW
+#define DWMSBT_MAINWINDOW 2
+#endif
+#define DWMWA_MICA_EFFECT_21H2 1029
 
 /* PREFERRED_APP_MODE argument to SetPreferredAppMode (ordinal 135, Win10 1903+). */
 #define PAM_DEFAULT   0
@@ -350,6 +371,8 @@ DELAYLOAD(g_hDwmapi, TEXT("dwmapi.dll"),  WINAPI, DlgDwmSetWindowAttribute, DwmS
           (HWND h, DWORD a, LPCVOID pv, DWORD cb), (h, a, pv, cb), HRESULT, E_NOTIMPL)
 DELAYLOAD(g_hDwmapi, TEXT("dwmapi.dll"),  WINAPI, DlgDwmDefWindowProc,      DwmDefWindowProc,
           (HWND h, UINT m, WPARAM w, LPARAM l, LRESULT* pr), (h, m, w, l, pr), BOOL, FALSE)
+DELAYLOAD(g_hDwmapi, TEXT("dwmapi.dll"),  WINAPI, DlgDwmExtendFrameIntoClientArea, DwmExtendFrameIntoClientArea,
+          (HWND h, const MARGINS* pm), (h, pm), HRESULT, E_NOTIMPL)
 DELAYLOAD(g_hUxtheme, TEXT("uxtheme.dll"), WINAPI, DlgSetWindowTheme,       SetWindowTheme,
           (HWND h, LPCWSTR a, LPCWSTR b), (h, a, b), HRESULT, E_NOTIMPL)
 DELAYLOAD(g_hUxtheme, TEXT("uxtheme.dll"), WINAPI, DlgOpenThemeData,        OpenThemeData,
@@ -359,6 +382,9 @@ DELAYLOAD(g_hUxtheme, TEXT("uxtheme.dll"), WINAPI, DlgCloseThemeData,       Clos
 DELAYLOAD(g_hUxtheme, TEXT("uxtheme.dll"), WINAPI, DlgDrawThemeTextEx,      DrawThemeTextEx,
           (HTHEME t, HDC dc, int iPart, int iState, LPCWSTR psz, int cch, DWORD fl, LPRECT prc, const DTTOPTS* po),
           (t, dc, iPart, iState, psz, cch, fl, prc, po), HRESULT, E_NOTIMPL)
+DELAYLOAD(g_hUxtheme, TEXT("uxtheme.dll"), WINAPI, DlgDrawThemeBackground,  DrawThemeBackground,
+          (HTHEME t, HDC dc, int iPart, int iState, const RECT* prc, const RECT* pClip),
+          (t, dc, iPart, iState, prc, pClip), HRESULT, E_NOTIMPL)
 DELAYLOAD(g_hAdvapi32, TEXT("advapi32.dll"), WINAPI, DlgRegOpenKeyExW,    RegOpenKeyExW,
           (HKEY h, LPCWSTR sub, DWORD opt, REGSAM sam, PHKEY pres), (h, sub, opt, sam, pres), LONG, ERROR_FILE_NOT_FOUND)
 DELAYLOAD(g_hAdvapi32, TEXT("advapi32.dll"), WINAPI, DlgRegQueryValueExW, RegQueryValueExW,
@@ -420,6 +446,15 @@ typedef struct tagUAHDRAWMENUITEM { DRAWITEMSTRUCT dis; UAHMENU um; UAHMENUITEM 
 #define DARK_TEXT      RGB(240, 240, 240)
 #define DARK_TEXT_DIM  RGB(150, 150, 150)
 
+#define BACKDROP_HOT_DARK     0x0F0F0F0FUL
+#define BACKDROP_HOT_LIGHT    0x0F000000UL
+#define BACKDROP_PUSHED_DARK  0x0A0A0A0AUL
+#define BACKDROP_PUSHED_LIGHT 0x0A000000UL
+
+#ifndef BST_HOT
+#define BST_HOT 0x0200
+#endif
+
 typedef struct MENUBAR_PALETTE
 {
     COLORREF clrBar;
@@ -449,6 +484,10 @@ static void MenuBarPalette(const THEMESTATE* pts, MENUBAR_PALETTE* pPalette)
         pPalette->clrItemHot    = GetSysColor(COLOR_MENUHILIGHT);
         pPalette->clrItemPushed = GetSysColor(COLOR_HIGHLIGHT);
     }
+    if (pts->fBackdrop)
+    {
+        pPalette->clrBar = RGB(0, 0, 0);
+    }
 }
 
 static void ThemePaintSolidColor(HDC hdc, const RECT* prc, COLORREF cr)
@@ -462,6 +501,80 @@ static void ThemePaintSolidColor(HDC hdc, const RECT* prc, COLORREF cr)
         (void)PatBlt(hdc, prc->left, prc->top, prc->right - prc->left, prc->bottom - prc->top, PATCOPY);
         SelectObject(hdc, hbrPrev);
     }
+}
+
+static BOOL BackdropDibCreate(BACKDROPDIB* pdib, int cx, int cy)
+{
+    BITMAPINFO bmi;
+
+    SecureZeroMemory(pdib, sizeof(*pdib));
+    if ((cx <= 0) || (cy <= 0))
+    {
+        return FALSE;
+    }
+    SecureZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize        = (DWORD)sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth       = cx;
+    bmi.bmiHeader.biHeight      = -cy;
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    pdib->hdc = CreateCompatibleDC(NULL);
+    if (!pdib->hdc)
+    {
+        return FALSE;
+    }
+    pdib->hbmp = CreateDIBSection(pdib->hdc, &bmi, DIB_RGB_COLORS, (void**)&pdib->pvBits, NULL, 0);
+    if (!pdib->hbmp || !pdib->pvBits)
+    {
+        (void)DeleteDC(pdib->hdc);
+        SecureZeroMemory(pdib, sizeof(*pdib));
+        return FALSE;
+    }
+    pdib->hbmpOld = SelectObject(pdib->hdc, pdib->hbmp);
+    pdib->cx      = cx;
+    pdib->cy      = cy;
+    return TRUE;
+}
+
+static void BackdropDibFill(const BACKDROPDIB* pdib, const RECT* prc, DWORD argb)
+{
+    RECT rc;
+    int  x;
+    int  y;
+
+    rc.left   = 0;
+    rc.top    = 0;
+    rc.right  = pdib->cx;
+    rc.bottom = pdib->cy;
+    if (prc && !IntersectRect(&rc, &rc, prc))
+    {
+        return;
+    }
+    for (y = rc.top; y < rc.bottom; ++y)
+    {
+        DWORD* pRow;
+
+        pRow = pdib->pvBits + ((SIZE_T)y * (SIZE_T)pdib->cx);
+        for (x = rc.left; x < rc.right; ++x)
+        {
+            pRow[x] = argb;
+        }
+    }
+}
+
+static void BackdropDibDestroy(BACKDROPDIB* pdib)
+{
+    if (pdib->hdc)
+    {
+        SelectObject(pdib->hdc, pdib->hbmpOld);
+        (void)DeleteDC(pdib->hdc);
+    }
+    if (pdib->hbmp)
+    {
+        (void)DeleteObject(pdib->hbmp);
+    }
+    SecureZeroMemory(pdib, sizeof(*pdib));
 }
 
 /* WM_UAHDRAWMENU: fill the whole menu-bar background. */
@@ -487,7 +600,8 @@ static void MenuBarOnDrawMenu(HWND hwnd, const UAHMENU* pUDM, const MENUBAR_PALE
 }
 
 /* WM_UAHDRAWMENUITEM: fill one bar item by state, then draw its label with the "Menu" theme part. */
-static void MenuBarOnDrawMenuItem(HWND hwnd, const UAHDRAWMENUITEM* pUDMI, const MENUBAR_PALETTE* pPalette)
+static void MenuBarOnDrawMenuItem(HWND hwnd, const UAHDRAWMENUITEM* pUDMI, const MENUBAR_PALETTE* pPalette,
+                                  const THEMESTATE* pts)
 {
     WCHAR         szText[64];
     MENUITEMINFOW mii;
@@ -523,6 +637,47 @@ static void MenuBarOnDrawMenuItem(HWND hwnd, const UAHDRAWMENUITEM* pUDMI, const
     (void)GetMenuItemInfoW(pUDMI->um.hmenu, (UINT)pUDMI->umi.iPosition, TRUE, &mii);
 
     rcItem = pUDMI->dis.rcItem;
+
+    if (pts->fBackdrop)
+    {
+        BACKDROPDIB dib;
+
+        if (BackdropDibCreate(&dib, rcItem.right - rcItem.left, rcItem.bottom - rcItem.top))
+        {
+            RECT  rcLocal;
+            DWORD argb;
+
+            rcLocal.left   = 0;
+            rcLocal.top    = 0;
+            rcLocal.right  = dib.cx;
+            rcLocal.bottom = dib.cy;
+            argb = 0;
+            if (fPushed)   { argb = (pts->fDark && (0 != pts->policy)) ? BACKDROP_PUSHED_DARK : BACKDROP_PUSHED_LIGHT; }
+            else if (fHot) { argb = (pts->fDark && (0 != pts->policy)) ? BACKDROP_HOT_DARK : BACKDROP_HOT_LIGHT; }
+            if (0 != argb)
+            {
+                BackdropDibFill(&dib, NULL, argb);
+            }
+            (void)SelectObject(dib.hdc, GetCurrentObject(pUDMI->um.hdc, OBJ_FONT));
+            hTheme = DlgOpenThemeData(hwnd, L"Menu");
+            if (hTheme)
+            {
+                DTTOPTS opts;
+
+                SecureZeroMemory(&opts, sizeof(opts));
+                opts.dwSize  = (DWORD)sizeof(opts);
+                opts.dwFlags = DTT_TEXTCOLOR | DTT_COMPOSITED;
+                opts.crText  = clrText;
+                (void)DlgDrawThemeTextEx(hTheme, dib.hdc, MENU_BARITEM, iState,
+                                         szText, -1, uFormat, &rcLocal, &opts);
+                (void)DlgCloseThemeData(hTheme);
+            }
+            (void)BitBlt(pUDMI->um.hdc, rcItem.left, rcItem.top, dib.cx, dib.cy, dib.hdc, 0, 0, SRCCOPY);
+            BackdropDibDestroy(&dib);
+            return;
+        }
+    }
+
     ThemePaintSolidColor(pUDMI->um.hdc, &rcItem, clrBg);
 
     hTheme = DlgOpenThemeData(hwnd, L"Menu");
@@ -674,8 +829,35 @@ static void ThemeCommitFrame(HWND hwnd)
                        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+static void ThemeExtendBackdrop(HWND hwnd, const THEMESTATE* pts)
+{
+    MARGINS     mar;
+    MENUBARINFO mbi;
+    RECT        rcClient;
+    RECT        rcWindow;
+    LONG        lTop;
+
+    if (!pts->fBackdrop)
+    {
+        return;
+    }
+    SecureZeroMemory(&mar, sizeof(mar));
+    GetClientRect(hwnd, &rcClient);
+    MapWindowPoints(hwnd, NULL, (POINT*)&rcClient, 2);
+    GetWindowRect(hwnd, &rcWindow);
+    lTop = rcClient.top;
+    SecureZeroMemory(&mbi, sizeof(mbi));
+    mbi.cbSize = sizeof(mbi);
+    if (GetMenuBarInfo(hwnd, OBJID_MENU, 0, &mbi) && (mbi.rcBar.top < lTop))
+    {
+        lTop = mbi.rcBar.top;
+    }
+    mar.cyBottomHeight = rcWindow.bottom - lTop;
+    (void)DlgDwmExtendFrameIntoClientArea(hwnd, &mar);
+}
+
 /* Dress the title-bar frame + the window's control sub-theme for the given mode. */
-static void ThemeApplyWindow(HWND hwnd, const THEMESTATE* pts, BOOL fDark)
+static void ThemeApplyWindow(HWND hwnd, THEMESTATE* pts, BOOL fDark)
 {
     BOOL fEffective;
 
@@ -687,12 +869,111 @@ static void ThemeApplyWindow(HWND hwnd, const THEMESTATE* pts, BOOL fDark)
        ignored, so this one call correctly darkens the title bar across every dark-capable build. */
     (void)DlgDwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &fEffective, sizeof(fEffective));
     (void)DlgDwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, &fEffective, sizeof(fEffective));
+
+    if (pts->fWin11)
+    {
+        int  nType;
+        BOOL fMica;
+
+        nType = DWMSBT_MAINWINDOW;
+        fMica = TRUE;
+        pts->fBackdrop =
+            SUCCEEDED(DlgDwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &nType, sizeof(nType))) ||
+            SUCCEEDED(DlgDwmSetWindowAttribute(hwnd, DWMWA_MICA_EFFECT_21H2, &fMica, sizeof(fMica)));
+        ThemeExtendBackdrop(hwnd, pts);
+    }
+}
+
+static LRESULT CALLBACK AboutOKSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    THEMESTATE* pts;
+
+    pts = (THEMESTATE*)GetWindowLongPtr(GetParent(hwnd), GWLP_USERDATA);
+    if (!pts || !pts->pfnAboutOK)
+    {
+        return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    }
+
+    if ((WM_PAINT == uMsg) && pts->fBackdrop)
+    {
+        PAINTSTRUCT  ps;
+        RECT         rc;
+        HDC          hdc;
+        BACKDROPDIB* pdib;
+
+        hdc = BeginPaint(hwnd, &ps);
+        if (hdc)
+        {
+            GetClientRect(hwnd, &rc);
+            pdib = &pts->dibAboutOK;
+            if ((pdib->cx != rc.right) || (pdib->cy != rc.bottom))
+            {
+                BackdropDibDestroy(pdib);
+                (void)BackdropDibCreate(pdib, rc.right, rc.bottom);
+            }
+            if (pdib->hdc)
+            {
+                WCHAR  szText[64];
+                HTHEME hTheme;
+                HFONT  hFont;
+                DWORD  dwState;
+                UINT   uFormat;
+                int    iState;
+
+                BackdropDibFill(pdib, NULL, 0);
+                dwState = (DWORD)SendMessage(hwnd, BM_GETSTATE, 0, 0);
+                iState  = (BS_DEFPUSHBUTTON & GetWindowLongPtr(hwnd, GWL_STYLE)) ? PBS_DEFAULTED : PBS_NORMAL;
+                if (BST_HOT & dwState)      { iState = PBS_HOT; }
+                if (BST_PUSHED & dwState)   { iState = PBS_PRESSED; }
+                if (!IsWindowEnabled(hwnd)) { iState = PBS_DISABLED; }
+                uFormat = DT_CENTER | DT_VCENTER | DT_SINGLELINE;
+                if (UISF_HIDEACCEL & (UINT)SendMessage(hwnd, WM_QUERYUISTATE, 0, 0))
+                {
+                    uFormat |= DT_HIDEPREFIX;
+                }
+                szText[0] = 0;
+                (void)GetWindowTextW(hwnd, szText, ARRAYSIZE(szText));
+                hFont = (HFONT)SendMessage(hwnd, WM_GETFONT, 0, 0);
+                if (hFont)
+                {
+                    (void)SelectObject(pdib->hdc, hFont);
+                }
+                hTheme = DlgOpenThemeData(hwnd, L"Button");
+                if (hTheme)
+                {
+                    DTTOPTS opts;
+
+                    (void)DlgDrawThemeBackground(hTheme, pdib->hdc, BP_PUSHBUTTON, iState, &rc, NULL);
+                    SecureZeroMemory(&opts, sizeof(opts));
+                    opts.dwSize  = (DWORD)sizeof(opts);
+                    opts.dwFlags = DTT_COMPOSITED;
+                    (void)DlgDrawThemeTextEx(hTheme, pdib->hdc, BP_PUSHBUTTON, iState,
+                                             szText, -1, uFormat, &rc, &opts);
+                    (void)DlgCloseThemeData(hTheme);
+                }
+                (void)BitBlt(hdc, 0, 0, pdib->cx, pdib->cy, pdib->hdc, 0, 0, SRCCOPY);
+            }
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    if (WM_NCDESTROY == uMsg)
+    {
+        LRESULT lResult;
+
+        lResult = CallWindowProc(pts->pfnAboutOK, hwnd, uMsg, wParam, lParam);
+        BackdropDibDestroy(&pts->dibAboutOK);
+        return lResult;
+    }
+
+    return CallWindowProc(pts->pfnAboutOK, hwnd, uMsg, wParam, lParam);
 }
 
 /* Dress (or re-dress) the About box for the given mode: title-bar frame + control sub-theme via
    ThemeApplyWindow, the OK button's push-button sub-theme, then a full repaint so the WM_CTLCOLOR*
    hooks in AboutDlgProc re-run with the new mode. */
-static void AboutDlgApplyTheme(HWND hDlg, const THEMESTATE* pts, BOOL fDark)
+static void AboutDlgApplyTheme(HWND hDlg, THEMESTATE* pts, BOOL fDark)
 {
     HWND hwndOK;
     BOOL fEffective;
@@ -704,6 +985,33 @@ static void AboutDlgApplyTheme(HWND hDlg, const THEMESTATE* pts, BOOL fDark)
     {
         (void)DlgAllowDarkModeForWindow(hwndOK, fEffective);
         (void)DlgSetWindowTheme(hwndOK, fEffective ? L"DarkMode_Explorer" : L"Explorer", NULL);
+        if (pts->fBackdrop &&
+            (AboutOKSubclassProc != (WNDPROC)GetWindowLongPtr(hwndOK, GWLP_WNDPROC)))
+        {
+            pts->pfnAboutOK = (WNDPROC)SetWindowLongPtr(hwndOK, GWLP_WNDPROC, (LONG_PTR)AboutOKSubclassProc);
+        }
+    }
+    if (pts->fBackdrop)
+    {
+        HWND hwndChild;
+
+        for (hwndChild = GetWindow(hDlg, GW_CHILD); hwndChild; hwndChild = GetWindow(hwndChild, GW_HWNDNEXT))
+        {
+            WCHAR    szClass[16];
+            LONG_PTR lStyle;
+
+            if (!GetClassNameW(hwndChild, szClass, ARRAYSIZE(szClass)) ||
+                (0 != lstrcmpiW(szClass, L"Static")))
+            {
+                continue;
+            }
+            lStyle = GetWindowLongPtr(hwndChild, GWL_STYLE);
+            if (SS_LEFT == (SS_TYPEMASK & lStyle))
+            {
+                (void)SetWindowLongPtr(hwndChild, GWL_STYLE,
+                                       (lStyle & ~(LONG_PTR)SS_TYPEMASK) | SS_OWNERDRAW);
+            }
+        }
     }
     ThemeCommitFrame(hDlg);  /* make the caption pick up the immersive-dark attribute */
     (void)RedrawWindow(hDlg, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
@@ -803,6 +1111,13 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
         {
             break;
         }
+        if (pts->fBackdrop)
+        {
+            SetTextColor((HDC)wParam, (pts->fDark && (0 != pts->policy))
+                                          ? DARK_TEXT : GetSysColor(COLOR_WINDOWTEXT));
+            SetBkMode((HDC)wParam, TRANSPARENT);
+            return (INT_PTR)GetStockObject(BLACK_BRUSH);
+        }
         if (pts->fDark && (0 != pts->policy))
         {
             SetTextColor((HDC)wParam, DARK_TEXT);
@@ -814,6 +1129,67 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
         SetTextColor((HDC)wParam, GetSysColor(COLOR_WINDOWTEXT));
         SetBkColor((HDC)wParam, GetSysColor(COLOR_WINDOW));
         return (INT_PTR)GetSysColorBrush(COLOR_WINDOW);
+
+    case WM_DRAWITEM:
+    {
+        const DRAWITEMSTRUCT* pdis;
+        BACKDROPDIB           dib;
+        WCHAR                 szText[128];
+        COLORREF              clrText;
+        UINT                  uFormat;
+        HFONT                 hFont;
+        HTHEME                hTheme;
+
+        pdis = (const DRAWITEMSTRUCT*)lParam;
+        if (!pts || !pts->fBackdrop || (ODT_STATIC != pdis->CtlType))
+        {
+            break;
+        }
+        szText[0] = 0;
+        (void)GetWindowTextW(pdis->hwndItem, szText, ARRAYSIZE(szText));
+        clrText = (pts->fDark && (0 != pts->policy)) ? DARK_TEXT : GetSysColor(COLOR_WINDOWTEXT);
+        uFormat = DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX;
+        hFont   = (HFONT)SendMessage(pdis->hwndItem, WM_GETFONT, 0, 0);
+        if (!BackdropDibCreate(&dib, pdis->rcItem.right - pdis->rcItem.left,
+                               pdis->rcItem.bottom - pdis->rcItem.top))
+        {
+            return TRUE;
+        }
+        if (hFont)
+        {
+            (void)SelectObject(dib.hdc, hFont);
+        }
+        hTheme = DlgOpenThemeData(hDlg, L"Menu");
+        {
+            RECT rcLocal;
+
+            rcLocal.left   = 0;
+            rcLocal.top    = 0;
+            rcLocal.right  = dib.cx;
+            rcLocal.bottom = dib.cy;
+            if (hTheme)
+            {
+                DTTOPTS opts;
+
+                SecureZeroMemory(&opts, sizeof(opts));
+                opts.dwSize  = (DWORD)sizeof(opts);
+                opts.dwFlags = DTT_COMPOSITED | DTT_TEXTCOLOR;
+                opts.crText  = clrText;
+                (void)DlgDrawThemeTextEx(hTheme, dib.hdc, MENU_BARITEM, MBI_NORMAL,
+                                         szText, -1, uFormat, &rcLocal, &opts);
+                (void)DlgCloseThemeData(hTheme);
+            }
+            else
+            {
+                SetBkMode(dib.hdc, TRANSPARENT);
+                SetTextColor(dib.hdc, clrText);
+                (void)DrawTextW(dib.hdc, szText, -1, &rcLocal, uFormat);
+            }
+        }
+        (void)BitBlt(pdis->hDC, pdis->rcItem.left, pdis->rcItem.top, dib.cx, dib.cy, dib.hdc, 0, 0, SRCCOPY);
+        BackdropDibDestroy(&dib);
+        return TRUE;
+    }
 
     case WM_COMMAND:
         switch (LOWORD(wParam))
@@ -869,16 +1245,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     // Owner-draw the bar dark ONLY in dark mode. In light mode fall through to DefWindowProc, which
     // renders the native Win10 aero menu bar -- the canonical light look (correct aero blue hover).
     pts->fActiveItem = FALSE;  // reset on a full bar repaint; hot item (if any) re-set below
-    if (!(pts->fDark && (0 != pts->policy))) { break; }
+    if (!(pts->fDark && (0 != pts->policy)) && !pts->fBackdrop) { break; }
     MenuBarPalette(pts, &pal);
     MenuBarOnDrawMenu(hwnd, (const UAHMENU*)lParam, &pal);
     return TRUE;
 
   case WM_UAHDRAWMENUITEM:
-    if (pts->fDark && (0 != pts->policy))
+    if ((pts->fDark && (0 != pts->policy)) || pts->fBackdrop)
     {
       MenuBarPalette(pts, &pal);
-      MenuBarOnDrawMenuItem(hwnd, (const UAHDRAWMENUITEM*)lParam, &pal);
+      MenuBarOnDrawMenuItem(hwnd, (const UAHDRAWMENUITEM*)lParam, &pal, pts);
       return TRUE;
     }
     // Light: let DefWindowProc draw the native aero box, but remember the hot/pressed item's rect so
@@ -907,11 +1283,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     MenuBarPaintSeam(hwnd, pts, &pal);
     return lResult;
 
+  case WM_SIZE:
+    ThemeExtendBackdrop(hwnd, pts);
+    break;
+
   case WM_ERASEBKGND:
   {
     RECT rc;
     GetClientRect(hwnd, &rc);
-    FillRect((HDC)wParam, &rc, pts->fDark ? pts->hbrDark : GetSysColorBrush(COLOR_WINDOW));
+    FillRect((HDC)wParam, &rc, pts->fBackdrop ? (HBRUSH)GetStockObject(BLACK_BRUSH)
+                                              : pts->fDark ? pts->hbrDark : GetSysColorBrush(COLOR_WINDOW));
     return 1;
   }
 
