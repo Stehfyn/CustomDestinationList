@@ -38,6 +38,7 @@ typedef struct THEMESTATE
     HBRUSH   hbrDark;              /* cached dark client-background brush                            */
     COLORREF clrDarkBg;
     int      policy;               /* 0 = no app dark mode, 1 = Win10 1809, 2 = Win10 1903+ / Win11  */
+    BOOL     fWin11;
     BOOL     fThemeChangePending;  /* an ImmersiveColorSet broadcast is queued for deferred handling */
     BOOL     fActiveItem;          /* light mode: a top-level menu item is hot/pressed              */
     RECT     rcActiveItem;         /* ...its rect (window coords), so the seam can spare its bottom  */
@@ -648,7 +649,8 @@ static void ThemeInitProcess(THEMESTATE* pts)
     else if (dwBuild >= BUILD_WIN10_1809) { pts->policy = 1; }
     else                                  { pts->policy = 0; }
 
-    pts->clrDarkBg = (dwBuild >= BUILD_WIN11_21H2) ? DARK_BG_WIN11 : DARK_BG;
+    pts->fWin11    = (dwBuild >= BUILD_WIN11_21H2);
+    pts->clrDarkBg = pts->fWin11 ? DARK_BG_WIN11 : DARK_BG;
 
     if (2 == pts->policy)      { (void)DlgSetPreferredAppMode(PAM_ALLOWDARK); }
     else if (1 == pts->policy) { (void)DlgAllowDarkModeForApp(TRUE); }
@@ -883,7 +885,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     // MenuBarPaintSeam can spare its bottom edge (the 2px seam would otherwise clip the box border).
     {
       const UAHDRAWMENUITEM* pmi = (const UAHDRAWMENUITEM*)lParam;
-      if (pmi->dis.itemState & (ODS_HOTLIGHT | ODS_SELECTED))
+      if (!pts->fWin11 && (pmi->dis.itemState & (ODS_HOTLIGHT | ODS_SELECTED)))
       {
         pts->rcActiveItem = pmi->dis.rcItem;
         pts->fActiveItem  = TRUE;
