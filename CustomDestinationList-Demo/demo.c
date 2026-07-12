@@ -56,6 +56,11 @@ typedef struct THEMESTATE
     HWND        hwndAbout;         /* live About box, so a system theme switch can re-dress it       */
     WNDPROC     pfnAboutOK;
     BACKDROPDIB dibAboutOK;
+    BACKDROPDIB dibAboutOKFrom;
+    BACKDROPDIB dibAboutOKTo;
+    int         iAboutOKState;
+    DWORD       dwAboutOKDur;
+    ULONGLONG   qwAboutOKStart;
 } THEMESTATE;
 static void ThemeInitProcess(THEMESTATE* pts);
 static void ThemeApplyWindow(HWND hwnd, THEMESTATE* pts, BOOL fDark);
@@ -385,6 +390,9 @@ DELAYLOAD(g_hUxtheme, TEXT("uxtheme.dll"), WINAPI, DlgDrawThemeTextEx,      Draw
 DELAYLOAD(g_hUxtheme, TEXT("uxtheme.dll"), WINAPI, DlgDrawThemeBackground,  DrawThemeBackground,
           (HTHEME t, HDC dc, int iPart, int iState, const RECT* prc, const RECT* pClip),
           (t, dc, iPart, iState, prc, pClip), HRESULT, E_NOTIMPL)
+DELAYLOAD(g_hUxtheme, TEXT("uxtheme.dll"), WINAPI, DlgGetThemeTransitionDuration, GetThemeTransitionDuration,
+          (HTHEME t, int iPart, int iStateFrom, int iStateTo, int iProp, DWORD* pdw),
+          (t, iPart, iStateFrom, iStateTo, iProp, pdw), HRESULT, E_NOTIMPL)
 DELAYLOAD(g_hAdvapi32, TEXT("advapi32.dll"), WINAPI, DlgRegOpenKeyExW,    RegOpenKeyExW,
           (HKEY h, LPCWSTR sub, DWORD opt, REGSAM sam, PHKEY pres), (h, sub, opt, sam, pres), LONG, ERROR_FILE_NOT_FOUND)
 DELAYLOAD(g_hAdvapi32, TEXT("advapi32.dll"), WINAPI, DlgRegQueryValueExW, RegQueryValueExW,
@@ -575,6 +583,46 @@ static void BackdropDibDestroy(BACKDROPDIB* pdib)
         (void)DeleteObject(pdib->hbmp);
     }
     SecureZeroMemory(pdib, sizeof(*pdib));
+}
+
+static BOOL BackdropDibEnsure(BACKDROPDIB* pdib, int cx, int cy)
+{
+    if (pdib->hdc && (pdib->cx == cx) && (pdib->cy == cy))
+    {
+        return TRUE;
+    }
+    BackdropDibDestroy(pdib);
+    return BackdropDibCreate(pdib, cx, cy);
+}
+
+static void BackdropDibBlend(const BACKDROPDIB* pFrom, const BACKDROPDIB* pTo, const BACKDROPDIB* pOut,
+                             DWORD dwAlpha)
+{
+    SIZE_T i;
+    SIZE_T c;
+
+    c = (SIZE_T)pOut->cx * (SIZE_T)pOut->cy;
+    for (i = 0; i < c; ++i)
+    {
+        DWORD f;
+        DWORD t;
+        DWORD o;
+        int   s;
+
+        f = pFrom->pvBits[i];
+        t = pTo->pvBits[i];
+        o = 0;
+        for (s = 0; s < 32; s += 8)
+        {
+            DWORD fb;
+            DWORD tb;
+
+            fb = 0xFF & (f >> s);
+            tb = 0xFF & (t >> s);
+            o |= (0xFF & ((fb * (255 - dwAlpha) + tb * dwAlpha + 127) / 255)) << s;
+        }
+        pOut->pvBits[i] = o;
+    }
 }
 
 /* WM_UAHDRAWMENU: fill the whole menu-bar background. */
@@ -884,6 +932,38 @@ static void ThemeApplyWindow(HWND hwnd, THEMESTATE* pts, BOOL fDark)
     }
 }
 
+static void AboutOKRenderState(const BACKDROPDIB* pdib, HTHEME hTheme, int iState, HFONT hFont,
+                               LPCWSTR pszText, UINT uFormat)
+{
+    RECT rc;
+
+    rc.left   = 0;
+    rc.top    = 0;
+    rc.right  = pdib->cx;
+    rc.bottom = pdib->cy;
+    BackdropDibFill(pdib, NULL, 0);
+    if (hFont)
+    {
+        (void)SelectObject(pdib->hdc, hFont);
+    }
+    if (hTheme)
+    {
+        DTTOPTS opts;
+
+        (void)DlgDrawThemeBackground(hTheme, pdib->hdc, BP_PUSHBUTTON, iState, &rc, NULL);
+        SecureZeroMemory(&opts, sizeof(opts));
+        opts.dwSize  = (DWORD)sizeof(opts);
+        opts.dwFlags = DTT_COMPOSITED;
+        (void)DlgDrawThemeTextEx(hTheme, pdib->hdc, BP_PUSHBUTTON, iState, pszText, -1, uFormat, &rc, &opts);
+    }
+    else
+    {
+        SetBkMode(pdib->hdc, TRANSPARENT);
+        SetTextColor(pdib->hdc, GetSysColor(COLOR_BTNTEXT));
+        (void)DrawTextW(pdib->hdc, pszText, -1, &rc, uFormat);
+    }
+}
+
 static LRESULT CALLBACK AboutOKSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     THEMESTATE* pts;
@@ -896,31 +976,26 @@ static LRESULT CALLBACK AboutOKSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 
     if ((WM_PAINT == uMsg) && pts->fBackdrop)
     {
-        PAINTSTRUCT  ps;
-        RECT         rc;
-        HDC          hdc;
-        BACKDROPDIB* pdib;
+        PAINTSTRUCT ps;
+        RECT        rc;
+        HDC         hdc;
 
         hdc = BeginPaint(hwnd, &ps);
         if (hdc)
         {
             GetClientRect(hwnd, &rc);
-            pdib = &pts->dibAboutOK;
-            if ((pdib->cx != rc.right) || (pdib->cy != rc.bottom))
+            if (BackdropDibEnsure(&pts->dibAboutOK, rc.right, rc.bottom) &&
+                BackdropDibEnsure(&pts->dibAboutOKFrom, rc.right, rc.bottom) &&
+                BackdropDibEnsure(&pts->dibAboutOKTo, rc.right, rc.bottom))
             {
-                BackdropDibDestroy(pdib);
-                (void)BackdropDibCreate(pdib, rc.right, rc.bottom);
-            }
-            if (pdib->hdc)
-            {
-                WCHAR  szText[64];
-                HTHEME hTheme;
-                HFONT  hFont;
-                DWORD  dwState;
-                UINT   uFormat;
-                int    iState;
+                WCHAR     szText[64];
+                HTHEME    hTheme;
+                HFONT     hFont;
+                DWORD     dwState;
+                UINT      uFormat;
+                int       iState;
+                ULONGLONG qwNow;
 
-                BackdropDibFill(pdib, NULL, 0);
                 dwState = (DWORD)SendMessage(hwnd, BM_GETSTATE, 0, 0);
                 iState  = (BS_DEFPUSHBUTTON & GetWindowLongPtr(hwnd, GWL_STYLE)) ? PBS_DEFAULTED : PBS_NORMAL;
                 if (BST_HOT & dwState)      { iState = PBS_HOT; }
@@ -933,28 +1008,74 @@ static LRESULT CALLBACK AboutOKSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                 }
                 szText[0] = 0;
                 (void)GetWindowTextW(hwnd, szText, ARRAYSIZE(szText));
-                hFont = (HFONT)SendMessage(hwnd, WM_GETFONT, 0, 0);
-                if (hFont)
-                {
-                    (void)SelectObject(pdib->hdc, hFont);
-                }
+                hFont  = (HFONT)SendMessage(hwnd, WM_GETFONT, 0, 0);
                 hTheme = DlgOpenThemeData(hwnd, L"Button");
+
+                if (0 == pts->iAboutOKState)
+                {
+                    pts->iAboutOKState = iState;
+                }
+                if (iState != pts->iAboutOKState)
+                {
+                    DWORD dwDur;
+
+                    dwDur = 0;
+                    if (!hTheme ||
+                        FAILED(DlgGetThemeTransitionDuration(hTheme, BP_PUSHBUTTON, pts->iAboutOKState,
+                                                             iState, TMT_TRANSITIONDURATIONS, &dwDur)))
+                    {
+                        dwDur = 0;
+                    }
+                    if (pts->dwAboutOKDur)
+                    {
+                        CopyMemory(pts->dibAboutOKFrom.pvBits, pts->dibAboutOK.pvBits,
+                                   (SIZE_T)pts->dibAboutOK.cx * (SIZE_T)pts->dibAboutOK.cy * sizeof(DWORD));
+                    }
+                    else
+                    {
+                        AboutOKRenderState(&pts->dibAboutOKFrom, hTheme, pts->iAboutOKState, hFont,
+                                           szText, uFormat);
+                    }
+                    AboutOKRenderState(&pts->dibAboutOKTo, hTheme, iState, hFont, szText, uFormat);
+                    pts->iAboutOKState  = iState;
+                    pts->dwAboutOKDur   = dwDur;
+                    pts->qwAboutOKStart = GetTickCount64();
+                    if (dwDur)
+                    {
+                        (void)SetTimer(hwnd, 1, USER_TIMER_MINIMUM, NULL);
+                    }
+                }
+
+                qwNow = GetTickCount64();
+                if (pts->dwAboutOKDur && ((qwNow - pts->qwAboutOKStart) < pts->dwAboutOKDur))
+                {
+                    BackdropDibBlend(&pts->dibAboutOKFrom, &pts->dibAboutOKTo, &pts->dibAboutOK,
+                                     (DWORD)(((qwNow - pts->qwAboutOKStart) * 255) / pts->dwAboutOKDur));
+                }
+                else
+                {
+                    if (pts->dwAboutOKDur)
+                    {
+                        pts->dwAboutOKDur = 0;
+                        (void)KillTimer(hwnd, 1);
+                    }
+                    AboutOKRenderState(&pts->dibAboutOK, hTheme, iState, hFont, szText, uFormat);
+                }
                 if (hTheme)
                 {
-                    DTTOPTS opts;
-
-                    (void)DlgDrawThemeBackground(hTheme, pdib->hdc, BP_PUSHBUTTON, iState, &rc, NULL);
-                    SecureZeroMemory(&opts, sizeof(opts));
-                    opts.dwSize  = (DWORD)sizeof(opts);
-                    opts.dwFlags = DTT_COMPOSITED;
-                    (void)DlgDrawThemeTextEx(hTheme, pdib->hdc, BP_PUSHBUTTON, iState,
-                                             szText, -1, uFormat, &rc, &opts);
                     (void)DlgCloseThemeData(hTheme);
                 }
-                (void)BitBlt(hdc, 0, 0, pdib->cx, pdib->cy, pdib->hdc, 0, 0, SRCCOPY);
+                (void)BitBlt(hdc, 0, 0, pts->dibAboutOK.cx, pts->dibAboutOK.cy,
+                             pts->dibAboutOK.hdc, 0, 0, SRCCOPY);
             }
         }
         EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    if ((WM_TIMER == uMsg) && (1 == wParam) && pts->fBackdrop)
+    {
+        InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     }
 
@@ -962,8 +1083,11 @@ static LRESULT CALLBACK AboutOKSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam,
     {
         LRESULT lResult;
 
+        (void)KillTimer(hwnd, 1);
         lResult = CallWindowProc(pts->pfnAboutOK, hwnd, uMsg, wParam, lParam);
         BackdropDibDestroy(&pts->dibAboutOK);
+        BackdropDibDestroy(&pts->dibAboutOKFrom);
+        BackdropDibDestroy(&pts->dibAboutOKTo);
         return lResult;
     }
 
@@ -988,6 +1112,8 @@ static void AboutDlgApplyTheme(HWND hDlg, THEMESTATE* pts, BOOL fDark)
         if (pts->fBackdrop &&
             (AboutOKSubclassProc != (WNDPROC)GetWindowLongPtr(hwndOK, GWLP_WNDPROC)))
         {
+            pts->iAboutOKState = 0;
+            pts->dwAboutOKDur  = 0;
             pts->pfnAboutOK = (WNDPROC)SetWindowLongPtr(hwndOK, GWLP_WNDPROC, (LONG_PTR)AboutOKSubclassProc);
         }
     }
