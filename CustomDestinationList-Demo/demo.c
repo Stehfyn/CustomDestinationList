@@ -14,6 +14,7 @@
 #include <propkey.h>
 #include <propsys.h>
 #pragma comment (lib, "dwmapi")
+#pragma comment (lib, "Msimg32")
 #pragma comment (lib, "Shcore")
 #pragma comment (lib, "UxTheme")
 #pragma comment (lib, "Version")
@@ -58,6 +59,7 @@ typedef struct THEMESTATE
     BACKDROPDIB dibAboutOK;
     BACKDROPDIB dibAboutOKFrom;
     BACKDROPDIB dibAboutOKTo;
+    BACKDROPDIB dibAboutOKScratch;
     int         iAboutOKState;
     DWORD       dwAboutOKDur;
     ULONGLONG   qwAboutOKStart;
@@ -458,6 +460,8 @@ typedef struct tagUAHDRAWMENUITEM { DRAWITEMSTRUCT dis; UAHMENU um; UAHMENUITEM 
 #define BACKDROP_HOT_LIGHT    0x0F000000UL
 #define BACKDROP_PUSHED_DARK  0x0A0A0A0AUL
 #define BACKDROP_PUSHED_LIGHT 0x0A000000UL
+
+#define BACKDROP_BTN_ALPHA 0x66
 
 #ifndef BST_HOT
 #define BST_HOT 0x0200
@@ -932,8 +936,8 @@ static void ThemeApplyWindow(HWND hwnd, THEMESTATE* pts, BOOL fDark)
     }
 }
 
-static void AboutOKRenderState(const BACKDROPDIB* pdib, HTHEME hTheme, int iState, HFONT hFont,
-                               LPCWSTR pszText, UINT uFormat)
+static void AboutOKRenderState(const BACKDROPDIB* pdib, const BACKDROPDIB* pScratch, HTHEME hTheme,
+                               int iState, HFONT hFont, LPCWSTR pszText, UINT uFormat)
 {
     RECT rc;
 
@@ -948,9 +952,17 @@ static void AboutOKRenderState(const BACKDROPDIB* pdib, HTHEME hTheme, int iStat
     }
     if (hTheme)
     {
-        DTTOPTS opts;
+        DTTOPTS       opts;
+        BLENDFUNCTION bf;
 
-        (void)DlgDrawThemeBackground(hTheme, pdib->hdc, BP_PUSHBUTTON, iState, &rc, NULL);
+        BackdropDibFill(pScratch, NULL, 0);
+        (void)DlgDrawThemeBackground(hTheme, pScratch->hdc, BP_PUSHBUTTON, iState, &rc, NULL);
+        bf.BlendOp             = AC_SRC_OVER;
+        bf.BlendFlags          = 0;
+        bf.SourceConstantAlpha = BACKDROP_BTN_ALPHA;
+        bf.AlphaFormat         = AC_SRC_ALPHA;
+        (void)AlphaBlend(pdib->hdc, 0, 0, pdib->cx, pdib->cy,
+                         pScratch->hdc, 0, 0, pScratch->cx, pScratch->cy, bf);
         SecureZeroMemory(&opts, sizeof(opts));
         opts.dwSize  = (DWORD)sizeof(opts);
         opts.dwFlags = DTT_COMPOSITED;
@@ -986,7 +998,8 @@ static LRESULT CALLBACK AboutOKSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam,
             GetClientRect(hwnd, &rc);
             if (BackdropDibEnsure(&pts->dibAboutOK, rc.right, rc.bottom) &&
                 BackdropDibEnsure(&pts->dibAboutOKFrom, rc.right, rc.bottom) &&
-                BackdropDibEnsure(&pts->dibAboutOKTo, rc.right, rc.bottom))
+                BackdropDibEnsure(&pts->dibAboutOKTo, rc.right, rc.bottom) &&
+                BackdropDibEnsure(&pts->dibAboutOKScratch, rc.right, rc.bottom))
             {
                 WCHAR     szText[64];
                 HTHEME    hTheme;
@@ -1033,10 +1046,11 @@ static LRESULT CALLBACK AboutOKSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                     }
                     else
                     {
-                        AboutOKRenderState(&pts->dibAboutOKFrom, hTheme, pts->iAboutOKState, hFont,
-                                           szText, uFormat);
+                        AboutOKRenderState(&pts->dibAboutOKFrom, &pts->dibAboutOKScratch, hTheme,
+                                           pts->iAboutOKState, hFont, szText, uFormat);
                     }
-                    AboutOKRenderState(&pts->dibAboutOKTo, hTheme, iState, hFont, szText, uFormat);
+                    AboutOKRenderState(&pts->dibAboutOKTo, &pts->dibAboutOKScratch, hTheme, iState,
+                                       hFont, szText, uFormat);
                     pts->iAboutOKState  = iState;
                     pts->dwAboutOKDur   = dwDur;
                     pts->qwAboutOKStart = GetTickCount64();
@@ -1059,7 +1073,8 @@ static LRESULT CALLBACK AboutOKSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam,
                         pts->dwAboutOKDur = 0;
                         (void)KillTimer(hwnd, 1);
                     }
-                    AboutOKRenderState(&pts->dibAboutOK, hTheme, iState, hFont, szText, uFormat);
+                    AboutOKRenderState(&pts->dibAboutOK, &pts->dibAboutOKScratch, hTheme, iState,
+                                       hFont, szText, uFormat);
                 }
                 if (hTheme)
                 {
@@ -1088,6 +1103,7 @@ static LRESULT CALLBACK AboutOKSubclassProc(HWND hwnd, UINT uMsg, WPARAM wParam,
         BackdropDibDestroy(&pts->dibAboutOK);
         BackdropDibDestroy(&pts->dibAboutOKFrom);
         BackdropDibDestroy(&pts->dibAboutOKTo);
+        BackdropDibDestroy(&pts->dibAboutOKScratch);
         return lResult;
     }
 
