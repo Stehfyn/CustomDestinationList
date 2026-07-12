@@ -71,6 +71,22 @@ static void ThemeApplyWindow(HWND hwnd, THEMESTATE* pts, BOOL fDark);
 static void ThemeExtendBackdrop(HWND hwnd, const THEMESTATE* pts);
 static void ThemeCommitFrame(HWND hwnd);
 
+static HHOOK              g_hMenuHook;
+static const THEMESTATE*  g_ptsMenuHook;
+static HBRUSH             g_hbrMenuMaterial;
+static HBITMAP            g_hbmpMenuMaterial;
+static LRESULT CALLBACK MenuHookProc(int nCode, WPARAM wParam, LPARAM lParam);
+static void MenuApplyMaterialBackground(HMENU hMenu);
+
+typedef HRESULT(WINAPI* PFN_DrawThemeBackground)(HTHEME, HDC, int, int, const RECT*, const RECT*);
+static PFN_DrawThemeBackground g_pfnDrawThemeBg;
+static PVOID                   g_pvDrawThemeBg;
+static BYTE                    g_abDtbOrig[14];
+static BYTE                    g_abDtbJmp[14];
+static BOOL                    g_fDtbHooked;
+static BOOL MenuRenderHookInstall(void);
+static void MenuRenderHookUninstall(void);
+
 /* Private message: a system light/dark switch, re-read on the next message-loop turn (see WndProc). */
 #define WMAPP_THEMECHANGED (WM_APP + 1)
 
@@ -115,6 +131,13 @@ void _tmain(void)
 
     // Opt the process into dark mode and read the live system setting before the class is registered.
     ThemeInitProcess(&ts);
+
+    if (ts.fWin11)
+    {
+      g_ptsMenuHook = &ts;
+      g_hMenuHook   = SetWindowsHookEx(WH_CALLWNDPROC, MenuHookProc, NULL, GetCurrentThreadId());
+      (void)MenuRenderHookInstall();
+    }
 
     SecureZeroMemory(&wcx, sizeof(wcx));
     wcx.cbSize        = sizeof(wcx);
@@ -191,6 +214,9 @@ void _tmain(void)
         }
       }
     }
+
+    MenuApplyMaterialBackground(GetMenu(hwnd));
+    MenuApplyMaterialBackground(GetSystemMenu(hwnd, FALSE));
 
     UpdateWindow(hwnd);
     ShowWindow(hwnd, SW_SHOWDEFAULT);
@@ -310,6 +336,12 @@ void _tmain(void)
         break;
     }
 
+    if (g_hMenuHook)
+    {
+      (void)UnhookWindowsHookEx(g_hMenuHook);
+    }
+    MenuRenderHookUninstall();
+
     ExitProcess(EXIT_SUCCESS);
 }
 
@@ -380,6 +412,26 @@ void _tmain(void)
 #endif
 #define DWMWA_MICA_EFFECT_21H2 1029
 
+#define WCA_ACCENT_POLICY               19
+#define ACCENT_ENABLE_ACRYLICBLURBEHIND 4
+#define ACCENT_WINDOWS11_LUMINOSITY     0x2
+#define ACCENT_BORDER_ALL               0x1E0
+
+typedef struct ACCENTPOLICY
+{
+    int   nAccentState;
+    int   nFlags;
+    DWORD dwGradientColor;
+    int   nAnimationId;
+} ACCENTPOLICY;
+
+typedef struct WINCOMPATTRDATA
+{
+    DWORD  dwAttrib;
+    PVOID  pvData;
+    SIZE_T cbData;
+} WINCOMPATTRDATA;
+
 /* PREFERRED_APP_MODE argument to SetPreferredAppMode (ordinal 135, Win10 1903+). */
 #define PAM_DEFAULT   0
 #define PAM_ALLOWDARK 1
@@ -390,6 +442,7 @@ void _tmain(void)
 #define ORD_ALLOW_DARK_FOR_WINDOW 133
 #define ORD_APP_MODE_135          135  /* AllowDarkModeForApp (1809) / SetPreferredAppMode (1903+) */
 #define ORD_FLUSH_MENU_THEMES     136
+#define ORD_GET_THEME_CLASS       74
 #define BUILD_WIN10_1809 17763u
 #define BUILD_WIN10_1903 18362u
 #define BUILD_WIN11_21H2 22000u
@@ -398,6 +451,7 @@ static HMODULE g_hUxtheme;
 static HMODULE g_hDwmapi;
 static HMODULE g_hNtdll;
 static HMODULE g_hAdvapi32;
+static HMODULE g_hUser32;
 
 /* Named exports -- delay-bound with the header's DELAYLOAD. */
 DELAYLOAD(g_hNtdll,  TEXT("ntdll.dll"),   WINAPI, DlgRtlGetVersion,        RtlGetVersion,
@@ -430,6 +484,8 @@ DELAYLOAD(g_hAdvapi32, TEXT("advapi32.dll"), WINAPI, DlgRegQueryValueExW, RegQue
           (h, val, res, pType, pData, pcb), LONG, ERROR_FILE_NOT_FOUND)
 DELAYLOAD(g_hAdvapi32, TEXT("advapi32.dll"), WINAPI, DlgRegCloseKey,      RegCloseKey,
           (HKEY h), (h), LONG, 0)
+DELAYLOAD(g_hUser32, TEXT("user32.dll"), WINAPI, DlgSetWindowCompositionAttribute, SetWindowCompositionAttribute,
+          (HWND h, WINCOMPATTRDATA* pd), (h, pd), BOOL, FALSE)
 
 /* Ordinal-only uxtheme dark-mode exports -- delay-bound with the local DELAYLOAD_ORDINAL. The two
    FlushMenuThemes/RefreshImmersiveColorPolicyState exports are void; they are typed BOOL here only so
@@ -448,6 +504,8 @@ DELAYLOAD_ORDINAL(g_hUxtheme, TEXT("uxtheme.dll"), WINAPI, DlgFlushMenuThemes,  
                   (void), (), BOOL, FALSE)
 DELAYLOAD_ORDINAL(g_hUxtheme, TEXT("uxtheme.dll"), WINAPI, DlgRefreshImmersiveColorPolicyState, ORD_REFRESH_IMMERSIVE,
                   (void), (), BOOL, FALSE)
+DELAYLOAD_ORDINAL(g_hUxtheme, TEXT("uxtheme.dll"), WINAPI, DlgGetThemeClass, ORD_GET_THEME_CLASS,
+                  (HTHEME t, LPWSTR psz, int cch), (t, psz, cch), HRESULT, E_FAIL)
 
 /* ---- undocumented "UAH" menu-bar paint messages (stable on Win10/11, in no SDK header) ---------- */
 #ifndef WM_UAHDRAWMENU
@@ -490,6 +548,9 @@ typedef struct tagUAHDRAWMENUITEM { DRAWITEMSTRUCT dis; UAHMENU um; UAHMENUITEM 
 #define BACKDROP_PUSHED_LIGHT 0x0A000000UL
 
 #define BACKDROP_BTN_ALPHA 0x66
+
+#define BACKDROP_MENU_TINT_DARK  0x412B2B2BUL
+#define BACKDROP_MENU_TINT_LIGHT 0x9EEEEEEEUL
 
 #ifndef BST_HOT
 #define BST_HOT 0x0200
@@ -888,6 +949,26 @@ static void ThemeInitProcess(THEMESTATE* pts)
     pts->clrDarkBg     = pts->fWin11 ? DARK_BG_WIN11 : DARK_BG;
     pts->nBackdropType = DWMSBT_MAINWINDOW;
 
+    if (pts->fWin11)
+    {
+        BITMAPINFO bmi;
+        VOID*      pvBits;
+
+        SecureZeroMemory(&bmi, sizeof(bmi));
+        bmi.bmiHeader.biSize        = (DWORD)sizeof(bmi.bmiHeader);
+        bmi.bmiHeader.biWidth       = 1;
+        bmi.bmiHeader.biHeight      = -1;
+        bmi.bmiHeader.biPlanes      = 1;
+        bmi.bmiHeader.biBitCount    = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        pvBits = NULL;
+        g_hbmpMenuMaterial = CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &pvBits, NULL, 0);
+        if (g_hbmpMenuMaterial)
+        {
+            g_hbrMenuMaterial = CreatePatternBrush(g_hbmpMenuMaterial);
+        }
+    }
+
     if (2 == pts->policy)      { (void)DlgSetPreferredAppMode(PAM_ALLOWDARK); }
     else if (1 == pts->policy) { (void)DlgAllowDarkModeForApp(TRUE); }
 
@@ -938,6 +1019,155 @@ static void ThemeExtendBackdrop(HWND hwnd, const THEMESTATE* pts)
         mar.cyBottomHeight = rcWindow.bottom - lTop;
     }
     (void)DlgDwmExtendFrameIntoClientArea(hwnd, &mar);
+}
+
+static void MenuFlyoutApplyMaterial(HWND hwnd)
+{
+    ACCENTPOLICY    ap;
+    WINCOMPATTRDATA data;
+
+    if (!g_ptsMenuHook || !g_ptsMenuHook->fWin11)
+    {
+        return;
+    }
+    SecureZeroMemory(&ap, sizeof(ap));
+    ap.nAccentState    = ACCENT_ENABLE_ACRYLICBLURBEHIND;
+    ap.nFlags          = ACCENT_WINDOWS11_LUMINOSITY | ACCENT_BORDER_ALL;
+    ap.dwGradientColor = (g_ptsMenuHook->fDark && (0 != g_ptsMenuHook->policy))
+                             ? BACKDROP_MENU_TINT_DARK : BACKDROP_MENU_TINT_LIGHT;
+    data.dwAttrib = WCA_ACCENT_POLICY;
+    data.pvData   = &ap;
+    data.cbData   = sizeof(ap);
+    (void)DlgSetWindowCompositionAttribute(hwnd, &data);
+}
+
+static void MenuApplyMaterialBackground(HMENU hMenu)
+{
+    MENUINFO mi;
+
+    if (!hMenu || !g_hbrMenuMaterial)
+    {
+        return;
+    }
+    SecureZeroMemory(&mi, sizeof(mi));
+    mi.cbSize  = sizeof(mi);
+    mi.fMask   = MIM_BACKGROUND | MIM_APPLYTOSUBMENUS;
+    mi.hbrBack = g_hbrMenuMaterial;
+    (void)SetMenuInfo(hMenu, &mi);
+}
+
+/* Ordinal-74 GetThemeClass gives the class string behind an HTHEME, so the DrawThemeBackground hook can
+   act on menu popups only (blackening a random control's parts would corrupt every themed window). */
+static BOOL MenuIsPopupTheme(HTHEME hTheme)
+{
+    WCHAR szClass[64];
+
+    szClass[0] = 0;
+    if (FAILED(DlgGetThemeClass(hTheme, szClass, ARRAYSIZE(szClass))))
+    {
+        return FALSE;
+    }
+    return (0 == lstrcmpiW(szClass, L"Menu"));
+}
+
+static HRESULT CallOriginalDrawThemeBackground(HTHEME hTheme, HDC hdc, int iPart, int iState,
+                                               const RECT* prc, const RECT* pClip)
+{
+    HRESULT hr;
+
+    /* Same-thread unpatch -> call -> repatch: no prologue relocation, and menus only ever paint on this
+       UI thread, so the momentary restore cannot race another caller. */
+    CopyMemory(g_pvDrawThemeBg, g_abDtbOrig, sizeof(g_abDtbOrig));
+    (void)FlushInstructionCache(GetCurrentProcess(), g_pvDrawThemeBg, sizeof(g_abDtbOrig));
+    hr = g_pfnDrawThemeBg(hTheme, hdc, iPart, iState, prc, pClip);
+    CopyMemory(g_pvDrawThemeBg, g_abDtbJmp, sizeof(g_abDtbJmp));
+    (void)FlushInstructionCache(GetCurrentProcess(), g_pvDrawThemeBg, sizeof(g_abDtbJmp));
+    return hr;
+}
+
+static HRESULT WINAPI HookedDrawThemeBackground(HTHEME hTheme, HDC hdc, int iPart, int iState,
+                                                const RECT* prc, const RECT* pClip)
+{
+    if (prc &&
+        ((MENU_POPUPBACKGROUND == iPart) || (MENU_POPUPBORDERS == iPart) || (MENU_POPUPGUTTER == iPart)) &&
+        MenuIsPopupTheme(hTheme))
+    {
+        /* Zeroed pixels == transparent premultiplied ARGB, so the acrylic reads through instead of the
+           opaque gutter/background/border the Menu theme would paint. (TranslucentFlyouts' technique.) */
+        (void)PatBlt(hdc, prc->left, prc->top, prc->right - prc->left, prc->bottom - prc->top, BLACKNESS);
+        return S_OK;
+    }
+    return CallOriginalDrawThemeBackground(hTheme, hdc, iPart, iState, prc, pClip);
+}
+
+static BOOL MenuRenderHookInstall(void)
+{
+    HMODULE hUx;
+    DWORD   dwOld;
+    union { FARPROC fp; PFN_DrawThemeBackground pfn; PVOID pv; } uTarget;
+    union { PFN_DrawThemeBackground pfn; UINT64 u64; } uHook;
+
+    hUx = LoadLibrary(TEXT("uxtheme.dll"));
+    if (!hUx)
+    {
+        return FALSE;
+    }
+    uTarget.fp = GetProcAddress(hUx, "DrawThemeBackground");
+    if (!uTarget.fp)
+    {
+        return FALSE;
+    }
+    g_pfnDrawThemeBg = uTarget.pfn;
+    g_pvDrawThemeBg  = uTarget.pv;
+
+    uHook.pfn        = HookedDrawThemeBackground;
+    g_abDtbJmp[0]    = 0xFF;   /* jmp qword ptr [rip+0] */
+    g_abDtbJmp[1]    = 0x25;
+    g_abDtbJmp[2]    = 0x00;
+    g_abDtbJmp[3]    = 0x00;
+    g_abDtbJmp[4]    = 0x00;
+    g_abDtbJmp[5]    = 0x00;
+    CopyMemory(&g_abDtbJmp[6], &uHook.u64, sizeof(uHook.u64));
+
+    if (!VirtualProtect(g_pvDrawThemeBg, sizeof(g_abDtbJmp), PAGE_EXECUTE_READWRITE, &dwOld))
+    {
+        return FALSE;
+    }
+    CopyMemory(g_abDtbOrig, g_pvDrawThemeBg, sizeof(g_abDtbOrig));
+    CopyMemory(g_pvDrawThemeBg, g_abDtbJmp, sizeof(g_abDtbJmp));
+    (void)FlushInstructionCache(GetCurrentProcess(), g_pvDrawThemeBg, sizeof(g_abDtbJmp));
+    g_fDtbHooked = TRUE;
+    return TRUE;
+}
+
+static void MenuRenderHookUninstall(void)
+{
+    if (!g_fDtbHooked)
+    {
+        return;
+    }
+    CopyMemory(g_pvDrawThemeBg, g_abDtbOrig, sizeof(g_abDtbOrig));
+    (void)FlushInstructionCache(GetCurrentProcess(), g_pvDrawThemeBg, sizeof(g_abDtbOrig));
+    g_fDtbHooked = FALSE;
+}
+
+static LRESULT CALLBACK MenuHookProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    const CWPSTRUCT* pcwp;
+
+    pcwp = (const CWPSTRUCT*)lParam;
+    if ((HC_ACTION == nCode) && pcwp &&
+        ((WM_CREATE == pcwp->message) || ((WM_SHOWWINDOW == pcwp->message) && pcwp->wParam)))
+    {
+        WCHAR szClass[16];
+
+        if (GetClassNameW(pcwp->hwnd, szClass, ARRAYSIZE(szClass)) &&
+            (0 == lstrcmpW(szClass, L"#32768")))
+        {
+            MenuFlyoutApplyMaterial(pcwp->hwnd);
+        }
+    }
+    return CallNextHookEx(g_hMenuHook, nCode, wParam, lParam);
 }
 
 /* Dress the title-bar frame + the window's control sub-theme for the given mode. */
@@ -1158,6 +1388,7 @@ static void AboutDlgApplyTheme(HWND hDlg, THEMESTATE* pts, BOOL fDark)
 
     fEffective = fDark && (0 != pts->policy);
     ThemeApplyWindow(hDlg, pts, fDark);
+    MenuApplyMaterialBackground(GetSystemMenu(hDlg, FALSE));
     hwndOK = GetDlgItem(hDlg, IDOK);
     if (hwndOK)
     {
@@ -1254,9 +1485,15 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
     {
         /* Center on the owner's window rect (the dialog manager only offsets from the owner's
            client origin, so an off-center owner position would carry over). */
-        HWND hwndOwner;
-        RECT rcOwner;
-        RECT rcDlg;
+        HWND        hwndOwner;
+        HMONITOR    hMonitor;
+        MONITORINFO mi;
+        RECT        rcOwner;
+        RECT        rcDlg;
+        LONG        x;
+        LONG        y;
+        LONG        w;
+        LONG        h;
 
         hwndOwner = GetParent(hDlg);
         if (!hwndOwner)
@@ -1265,10 +1502,25 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
         }
         GetWindowRect(hwndOwner, &rcOwner);
         GetWindowRect(hDlg, &rcDlg);
-        (void)SetWindowPos(hDlg, NULL,
-                           rcOwner.left + (LONG)(RECTWIDTH(rcOwner) - RECTWIDTH(rcDlg)) / 2,
-                           rcOwner.top + (LONG)(RECTHEIGHT(rcOwner) - RECTHEIGHT(rcDlg)) / 2,
-                           0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        w = RECTWIDTH(rcDlg);
+        h = RECTHEIGHT(rcDlg);
+        x = rcOwner.left + (LONG)(RECTWIDTH(rcOwner) - w) / 2;
+        y = rcOwner.top + (LONG)(RECTHEIGHT(rcOwner) - h) / 2;
+
+        /* Clamp onto the work area of the monitor the centered rect lands on, so an owner that sits
+           partly (or wholly) off-screen can't push the About box outside the visible desktop. */
+        rcDlg.left   = x;
+        rcDlg.top    = y;
+        rcDlg.right  = x + w;
+        rcDlg.bottom = y + h;
+        hMonitor     = MonitorFromRect(&rcDlg, MONITOR_DEFAULTTONEAREST);
+        mi.cbSize    = sizeof(mi);
+        if (hMonitor && GetMonitorInfo(hMonitor, &mi))
+        {
+            x = CLAMP(x, mi.rcWork.left, mi.rcWork.right - w);
+            y = CLAMP(y, mi.rcWork.top, mi.rcWork.bottom - h);
+        }
+        (void)SetWindowPos(hDlg, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
         pts = (THEMESTATE*)lParam;
         (void)SetWindowLongPtr(hDlg, GWLP_USERDATA, (LONG_PTR)pts);
