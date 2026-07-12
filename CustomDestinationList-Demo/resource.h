@@ -17,7 +17,11 @@
 #define IDM_CUT                         32775
 #define IDM_COPY                        32776
 #define IDM_PASTE                       32777
-#define IDM_STATUSBAR                   32778
+#define IDM_BACKDROP_AUTO               32778
+#define IDM_BACKDROP_NONE               32779
+#define IDM_BACKDROP_MICA               32780
+#define IDM_BACKDROP_ACRYLIC            32781
+#define IDM_BACKDROP_MICAALT            32782
 #define IDC_STATIC                      -1
 // Next default values for new objects
 // 

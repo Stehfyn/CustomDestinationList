@@ -51,6 +51,8 @@ typedef struct THEMESTATE
     int      policy;               /* 0 = no app dark mode, 1 = Win10 1809, 2 = Win10 1903+ / Win11  */
     BOOL     fWin11;
     BOOL     fBackdrop;
+    BOOL     fBackdropTypes;
+    int      nBackdropType;
     BOOL     fThemeChangePending;  /* an ImmersiveColorSet broadcast is queued for deferred handling */
     BOOL     fActiveItem;          /* light mode: a top-level menu item is hot/pressed              */
     RECT     rcActiveItem;         /* ...its rect (window coords), so the seam can spare its bottom  */
@@ -163,6 +165,32 @@ void _tmain(void)
     // applied here for maximize/restore-down non-client operability to work.
     ThemeApplyWindow(hwnd, &ts, ts.fDark);
     ThemeCommitFrame(hwnd);  // make the first composition pick up the immersive-dark attribute
+
+    if (ts.fBackdropTypes)
+    {
+      HMENU hmenuView;
+
+      hmenuView = CreatePopupMenu();
+      if (hmenuView)
+      {
+        (void)AppendMenu(hmenuView, MF_STRING, IDM_BACKDROP_AUTO,    TEXT("&Auto"));
+        (void)AppendMenu(hmenuView, MF_STRING, IDM_BACKDROP_NONE,    TEXT("&None"));
+        (void)AppendMenu(hmenuView, MF_STRING, IDM_BACKDROP_MICA,    TEXT("&Mica"));
+        (void)AppendMenu(hmenuView, MF_STRING, IDM_BACKDROP_ACRYLIC, TEXT("A&crylic"));
+        (void)AppendMenu(hmenuView, MF_STRING, IDM_BACKDROP_MICAALT, TEXT("Mica Al&t"));
+        (void)CheckMenuRadioItem(hmenuView, IDM_BACKDROP_AUTO, IDM_BACKDROP_MICAALT,
+                                 IDM_BACKDROP_AUTO + (UINT)ts.nBackdropType, MF_BYCOMMAND);
+        if (InsertMenu(GetMenu(hwnd), 2, MF_BYPOSITION | MF_POPUP | MF_STRING,
+                       (UINT_PTR)hmenuView, TEXT("&View")))
+        {
+          DrawMenuBar(hwnd);
+        }
+        else
+        {
+          (void)DestroyMenu(hmenuView);
+        }
+      }
+    }
 
     UpdateWindow(hwnd);
     ShowWindow(hwnd, SW_SHOWDEFAULT);
@@ -856,8 +884,9 @@ static void ThemeInitProcess(THEMESTATE* pts)
     else if (dwBuild >= BUILD_WIN10_1809) { pts->policy = 1; }
     else                                  { pts->policy = 0; }
 
-    pts->fWin11    = (dwBuild >= BUILD_WIN11_21H2);
-    pts->clrDarkBg = pts->fWin11 ? DARK_BG_WIN11 : DARK_BG;
+    pts->fWin11        = (dwBuild >= BUILD_WIN11_21H2);
+    pts->clrDarkBg     = pts->fWin11 ? DARK_BG_WIN11 : DARK_BG;
+    pts->nBackdropType = DWMSBT_MAINWINDOW;
 
     if (2 == pts->policy)      { (void)DlgSetPreferredAppMode(PAM_ALLOWDARK); }
     else if (1 == pts->policy) { (void)DlgAllowDarkModeForApp(TRUE); }
@@ -889,22 +918,25 @@ static void ThemeExtendBackdrop(HWND hwnd, const THEMESTATE* pts)
     RECT        rcWindow;
     LONG        lTop;
 
-    if (!pts->fBackdrop)
+    if (!pts->fWin11)
     {
         return;
     }
     SecureZeroMemory(&mar, sizeof(mar));
-    GetClientRect(hwnd, &rcClient);
-    MapWindowPoints(hwnd, NULL, (POINT*)&rcClient, 2);
-    GetWindowRect(hwnd, &rcWindow);
-    lTop = rcClient.top;
-    SecureZeroMemory(&mbi, sizeof(mbi));
-    mbi.cbSize = sizeof(mbi);
-    if (GetMenuBarInfo(hwnd, OBJID_MENU, 0, &mbi) && (mbi.rcBar.top < lTop))
+    if (pts->fBackdrop)
     {
-        lTop = mbi.rcBar.top;
+        GetClientRect(hwnd, &rcClient);
+        MapWindowPoints(hwnd, NULL, (POINT*)&rcClient, 2);
+        GetWindowRect(hwnd, &rcWindow);
+        lTop = rcClient.top;
+        SecureZeroMemory(&mbi, sizeof(mbi));
+        mbi.cbSize = sizeof(mbi);
+        if (GetMenuBarInfo(hwnd, OBJID_MENU, 0, &mbi) && (mbi.rcBar.top < lTop))
+        {
+            lTop = mbi.rcBar.top;
+        }
+        mar.cyBottomHeight = rcWindow.bottom - lTop;
     }
-    mar.cyBottomHeight = rcWindow.bottom - lTop;
     (void)DlgDwmExtendFrameIntoClientArea(hwnd, &mar);
 }
 
@@ -927,11 +959,17 @@ static void ThemeApplyWindow(HWND hwnd, THEMESTATE* pts, BOOL fDark)
         int  nType;
         BOOL fMica;
 
-        nType = DWMSBT_MAINWINDOW;
-        fMica = TRUE;
-        pts->fBackdrop =
-            SUCCEEDED(DlgDwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &nType, sizeof(nType))) ||
-            SUCCEEDED(DlgDwmSetWindowAttribute(hwnd, DWMWA_MICA_EFFECT_21H2, &fMica, sizeof(fMica)));
+        nType = pts->nBackdropType;
+        if (SUCCEEDED(DlgDwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &nType, sizeof(nType))))
+        {
+            pts->fBackdropTypes = TRUE;
+            pts->fBackdrop      = (DWMSBT_MAINWINDOW <= nType);
+        }
+        else
+        {
+            fMica = TRUE;
+            pts->fBackdrop = SUCCEEDED(DlgDwmSetWindowAttribute(hwnd, DWMWA_MICA_EFFECT_21H2, &fMica, sizeof(fMica)));
+        }
         ThemeExtendBackdrop(hwnd, pts);
     }
 }
@@ -1467,6 +1505,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
       return 0;
     case IDM_ABOUT:
       DialogBoxParam((HINSTANCE)&__ImageBase, MAKEINTRESOURCE(IDD_ABOUTBOX), hwnd, AboutDlgProc, (LPARAM)pts);
+      return 0;
+    case IDM_BACKDROP_AUTO:
+    case IDM_BACKDROP_NONE:
+    case IDM_BACKDROP_MICA:
+    case IDM_BACKDROP_ACRYLIC:
+    case IDM_BACKDROP_MICAALT:
+      pts->nBackdropType = (int)(LOWORD(wParam) - IDM_BACKDROP_AUTO);
+      ThemeApplyWindow(hwnd, pts, pts->fDark);
+      ThemeCommitFrame(hwnd);
+      InvalidateRect(hwnd, NULL, TRUE);
+      DrawMenuBar(hwnd);
+      MenuBarPalette(pts, &pal);
+      MenuBarPaintSeam(hwnd, pts, &pal);
+      (void)CheckMenuRadioItem(GetMenu(hwnd), IDM_BACKDROP_AUTO, IDM_BACKDROP_MICAALT,
+                               LOWORD(wParam), MF_BYCOMMAND);
       return 0;
     default:
       break;
