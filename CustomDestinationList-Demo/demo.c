@@ -37,6 +37,7 @@ static void ThemeApplyWindow(HWND hwnd, BOOL fDark);
 static void ThemeCommitFrame(HWND hwnd);
 static BOOL   g_fDark;                /* current effective dark mode (follows the system setting live)  */
 static HBRUSH g_hbrDark;              /* cached dark client-background brush                            */
+static COLORREF g_clrDarkBg;
 static int    g_policy;               /* 0 = no app dark mode, 1 = Win10 1809, 2 = Win10 1903+ / Win11  */
 static BOOL   g_fThemeChangePending;  /* an ImmersiveColorSet broadcast is queued for deferred handling */
 static BOOL   g_fActiveItem;          /* light mode: a top-level menu item is hot/pressed              */
@@ -330,6 +331,7 @@ void _tmain(void)
 #define ORD_FLUSH_MENU_THEMES     136
 #define BUILD_WIN10_1809 17763u
 #define BUILD_WIN10_1903 18362u
+#define BUILD_WIN11_21H2 22000u
 
 static HMODULE g_hUxtheme;
 static HMODULE g_hDwmapi;
@@ -407,6 +409,7 @@ typedef struct tagUAHDRAWMENUITEM { DRAWITEMSTRUCT dis; UAHMENU um; UAHMENUITEM 
 
 /* ---- palette -------------------------------------------------------------------------------- */
 #define DARK_BG        RGB(43, 43, 43)  // matches the system's dark title-bar color
+#define DARK_BG_WIN11  RGB(32, 32, 32)
 #define DARK_BG_HOT    RGB(64, 64, 64)
 #define DARK_BG_PUSHED RGB(80, 80, 80)
 #define DARK_TEXT      RGB(240, 240, 240)
@@ -425,7 +428,7 @@ static void MenuBarPalette(BOOL fDark, MENUBAR_PALETTE* pPalette)
 {
     if (fDark && (0 != g_policy))
     {
-        pPalette->clrBar        = DARK_BG;
+        pPalette->clrBar        = g_clrDarkBg;
         pPalette->clrText       = DARK_TEXT;
         pPalette->clrTextDim    = DARK_TEXT_DIM;
         pPalette->clrItemHot    = DARK_BG_HOT;
@@ -640,6 +643,8 @@ static void ThemeInitProcess(void)
     else if (dwBuild >= BUILD_WIN10_1809) { g_policy = 1; }
     else                                  { g_policy = 0; }
 
+    g_clrDarkBg = (dwBuild >= BUILD_WIN11_21H2) ? DARK_BG_WIN11 : DARK_BG;
+
     if (2 == g_policy)      { (void)DlgSetPreferredAppMode(PAM_ALLOWDARK); }
     else if (1 == g_policy) { (void)DlgAllowDarkModeForApp(TRUE); }
 
@@ -647,7 +652,7 @@ static void ThemeInitProcess(void)
     (void)DlgFlushMenuThemes();
 
     g_fDark   = ThemeSystemUsesDarkMode();
-    g_hbrDark = CreateSolidBrush(DARK_BG);
+    g_hbrDark = CreateSolidBrush(g_clrDarkBg);
 }
 
 /* Force the DWM caption to recomposite so it re-reads the immersive-dark attribute just set. The
@@ -783,7 +788,7 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
         if (g_fDark && (0 != g_policy))
         {
             SetTextColor((HDC)wParam, DARK_TEXT);
-            SetBkColor((HDC)wParam, DARK_BG);
+            SetBkColor((HDC)wParam, g_clrDarkBg);
             return (INT_PTR)g_hbrDark;
         }
         /* Light: the stock dialog brush is COLOR_3DFACE, but the main window's client paints
