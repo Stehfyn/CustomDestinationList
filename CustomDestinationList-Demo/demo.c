@@ -32,17 +32,20 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
 static void GetStartupRect(int nWidth, int nHeight, LPRECT lprc);
 
 /* Dark-mode + custom-menu-bar state (defined with the theming helpers, below WndProc). */
-static void ThemeInitProcess(void);
-static void ThemeApplyWindow(HWND hwnd, BOOL fDark);
+typedef struct THEMESTATE
+{
+    BOOL     fDark;                /* current effective dark mode (follows the system setting live)  */
+    HBRUSH   hbrDark;              /* cached dark client-background brush                            */
+    COLORREF clrDarkBg;
+    int      policy;               /* 0 = no app dark mode, 1 = Win10 1809, 2 = Win10 1903+ / Win11  */
+    BOOL     fThemeChangePending;  /* an ImmersiveColorSet broadcast is queued for deferred handling */
+    BOOL     fActiveItem;          /* light mode: a top-level menu item is hot/pressed              */
+    RECT     rcActiveItem;         /* ...its rect (window coords), so the seam can spare its bottom  */
+    HWND     hwndAbout;            /* live About box, so a system theme switch can re-dress it       */
+} THEMESTATE;
+static void ThemeInitProcess(THEMESTATE* pts);
+static void ThemeApplyWindow(HWND hwnd, const THEMESTATE* pts, BOOL fDark);
 static void ThemeCommitFrame(HWND hwnd);
-static BOOL   g_fDark;                /* current effective dark mode (follows the system setting live)  */
-static HBRUSH g_hbrDark;              /* cached dark client-background brush                            */
-static COLORREF g_clrDarkBg;
-static int    g_policy;               /* 0 = no app dark mode, 1 = Win10 1809, 2 = Win10 1903+ / Win11  */
-static BOOL   g_fThemeChangePending;  /* an ImmersiveColorSet broadcast is queued for deferred handling */
-static BOOL   g_fActiveItem;          /* light mode: a top-level menu item is hot/pressed              */
-static RECT   g_rcActiveItem;         /* ...its rect (window coords), so the seam can spare its bottom  */
-static HWND   g_hwndAbout;            /* live About box, so a system theme switch can re-dress it       */
 
 /* Private message: a system light/dark switch, re-read on the next message-loop turn (see WndProc). */
 #define WMAPP_THEMECHANGED (WM_APP + 1)
@@ -74,6 +77,7 @@ void _tmain(void)
     PWSTR pszAppId;
     STARTUPINFO si;
     RECT rc;
+    THEMESTATE ts;
 
     if (FAILED(hr = CoInitializeEx(0, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE | COINIT_SPEED_OVER_MEMORY)))
     {
@@ -86,7 +90,7 @@ void _tmain(void)
     }
 
     // Opt the process into dark mode and read the live system setting before the class is registered.
-    ThemeInitProcess();
+    ThemeInitProcess(&ts);
 
     SecureZeroMemory(&wcx, sizeof(wcx));
     wcx.cbSize        = sizeof(wcx);
@@ -115,7 +119,7 @@ void _tmain(void)
         szClassAtom, TEXT("CustomDestinationList-Demo"),
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         CW_USEDEFAULT, CW_USEDEFAULT, RECTWIDTH(rc), RECTHEIGHT(rc),
-        HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
+        HWND_TOP, NULL, (HINSTANCE)&__ImageBase, &ts);
     }
     else
     {
@@ -124,7 +128,7 @@ void _tmain(void)
         szClassAtom, TEXT("CustomDestinationList-Demo"), 
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
         rc.left, rc.top, RECTWIDTH(rc), RECTHEIGHT(rc),
-        HWND_TOP, NULL, (HINSTANCE)&__ImageBase, NULL);
+        HWND_TOP, NULL, (HINSTANCE)&__ImageBase, &ts);
     }
 
     if (!hwnd)
@@ -135,7 +139,7 @@ void _tmain(void)
     // Dress the title-bar frame, the window's control sub-theme, and (via WM_UAHDRAWMENU*) the menu
     // bar to match the current system theme. Win11 24H2 also needs the DarkMode_Explorer sub-theme
     // applied here for maximize/restore-down non-client operability to work.
-    ThemeApplyWindow(hwnd, g_fDark);
+    ThemeApplyWindow(hwnd, &ts, ts.fDark);
     ThemeCommitFrame(hwnd);  // make the first composition pick up the immersive-dark attribute
 
     UpdateWindow(hwnd);
@@ -424,11 +428,11 @@ typedef struct MENUBAR_PALETTE
     COLORREF clrItemPushed;
 } MENUBAR_PALETTE;
 
-static void MenuBarPalette(BOOL fDark, MENUBAR_PALETTE* pPalette)
+static void MenuBarPalette(const THEMESTATE* pts, MENUBAR_PALETTE* pPalette)
 {
-    if (fDark && (0 != g_policy))
+    if (pts->fDark && (0 != pts->policy))
     {
-        pPalette->clrBar        = g_clrDarkBg;
+        pPalette->clrBar        = pts->clrDarkBg;
         pPalette->clrText       = DARK_TEXT;
         pPalette->clrTextDim    = DARK_TEXT_DIM;
         pPalette->clrItemHot    = DARK_BG_HOT;
@@ -542,7 +546,7 @@ static void MenuBarOnDrawMenuItem(HWND hwnd, const UAHDRAWMENUITEM* pUDMI, const
 
 /* Paint the 1px seam the standard frame draws between the menu bar and the client in the bar color,
    so no light line survives under a dark bar (the win32-custom-menubar-aero-theme seam fix). */
-static void MenuBarPaintSeam(HWND hwnd, const MENUBAR_PALETTE* pPalette)
+static void MenuBarPaintSeam(HWND hwnd, const THEMESTATE* pts, const MENUBAR_PALETTE* pPalette)
 {
     MENUBARINFO mbi;
     RECT        rcClient;
@@ -573,12 +577,12 @@ static void MenuBarPaintSeam(HWND hwnd, const MENUBAR_PALETTE* pPalette)
     // If a top-level item is hot/pressed (light mode), paint the seam in two parts so its x-range is
     // left untouched -- the native aero box keeps its own bottom edge there, while the separator stays
     // covered everywhere else. Full-width single line otherwise.
-    if (g_fActiveItem)
+    if (pts->fActiveItem)
     {
         RECT rcLeft  = rcLine;
         RECT rcRight = rcLine;
-        rcLeft.right = g_rcActiveItem.left;
-        rcRight.left = g_rcActiveItem.right;
+        rcLeft.right = pts->rcActiveItem.left;
+        rcRight.left = pts->rcActiveItem.right;
         if (rcLeft.right > rcLeft.left)   { ThemePaintSolidColor(hdc, &rcLeft, pPalette->clrBar); }
         if (rcRight.right > rcRight.left) { ThemePaintSolidColor(hdc, &rcRight, pPalette->clrBar); }
     }
@@ -594,14 +598,14 @@ static void MenuBarPaintSeam(HWND hwnd, const MENUBAR_PALETTE* pPalette)
    it broadcasts WM_SETTINGCHANGE, so it is already current when we handle the broadcast. This avoids
    ShouldAppsUseDarkMode (ordinal 132), whose value is a policy snapshot that can stay stale across a
    live switch. Falls back to the ordinal export if the key can't be read. */
-static BOOL ThemeSystemUsesDarkMode(void)
+static BOOL ThemeSystemUsesDarkMode(const THEMESTATE* pts)
 {
     HKEY  hKey;
     DWORD dwValue;
     DWORD dwType;
     DWORD cbValue;
 
-    if (0 == g_policy)
+    if (0 == pts->policy)
     {
         return FALSE;
     }
@@ -626,11 +630,12 @@ static BOOL ThemeSystemUsesDarkMode(void)
 }
 
 /* Read the current OS build and classify the app-dark-mode policy. */
-static void ThemeInitProcess(void)
+static void ThemeInitProcess(THEMESTATE* pts)
 {
     OSVERSIONINFOEXW osvi;
     DWORD            dwBuild;
 
+    SecureZeroMemory(pts, sizeof(*pts));
     SecureZeroMemory(&osvi, sizeof(osvi));
     osvi.dwOSVersionInfoSize = (DWORD)sizeof(osvi);
     dwBuild = 0;
@@ -639,20 +644,20 @@ static void ThemeInitProcess(void)
         dwBuild = osvi.dwBuildNumber;
     }
 
-    if (dwBuild >= BUILD_WIN10_1903)      { g_policy = 2; }
-    else if (dwBuild >= BUILD_WIN10_1809) { g_policy = 1; }
-    else                                  { g_policy = 0; }
+    if (dwBuild >= BUILD_WIN10_1903)      { pts->policy = 2; }
+    else if (dwBuild >= BUILD_WIN10_1809) { pts->policy = 1; }
+    else                                  { pts->policy = 0; }
 
-    g_clrDarkBg = (dwBuild >= BUILD_WIN11_21H2) ? DARK_BG_WIN11 : DARK_BG;
+    pts->clrDarkBg = (dwBuild >= BUILD_WIN11_21H2) ? DARK_BG_WIN11 : DARK_BG;
 
-    if (2 == g_policy)      { (void)DlgSetPreferredAppMode(PAM_ALLOWDARK); }
-    else if (1 == g_policy) { (void)DlgAllowDarkModeForApp(TRUE); }
+    if (2 == pts->policy)      { (void)DlgSetPreferredAppMode(PAM_ALLOWDARK); }
+    else if (1 == pts->policy) { (void)DlgAllowDarkModeForApp(TRUE); }
 
     (void)DlgRefreshImmersiveColorPolicyState();
     (void)DlgFlushMenuThemes();
 
-    g_fDark   = ThemeSystemUsesDarkMode();
-    g_hbrDark = CreateSolidBrush(g_clrDarkBg);
+    pts->fDark   = ThemeSystemUsesDarkMode(pts);
+    pts->hbrDark = CreateSolidBrush(pts->clrDarkBg);
 }
 
 /* Force the DWM caption to recomposite so it re-reads the immersive-dark attribute just set. The
@@ -668,11 +673,11 @@ static void ThemeCommitFrame(HWND hwnd)
 }
 
 /* Dress the title-bar frame + the window's control sub-theme for the given mode. */
-static void ThemeApplyWindow(HWND hwnd, BOOL fDark)
+static void ThemeApplyWindow(HWND hwnd, const THEMESTATE* pts, BOOL fDark)
 {
     BOOL fEffective;
 
-    fEffective = fDark && (0 != g_policy);
+    fEffective = fDark && (0 != pts->policy);
     (void)DlgAllowDarkModeForWindow(hwnd, fEffective);
     (void)DlgSetWindowTheme(hwnd, fEffective ? L"DarkMode_Explorer" : L"Explorer", NULL);
     /* Set BOTH immersive-dark attribute ids unconditionally: 20 is the current id (Win10 20H1+/Win11),
@@ -685,13 +690,13 @@ static void ThemeApplyWindow(HWND hwnd, BOOL fDark)
 /* Dress (or re-dress) the About box for the given mode: title-bar frame + control sub-theme via
    ThemeApplyWindow, the OK button's push-button sub-theme, then a full repaint so the WM_CTLCOLOR*
    hooks in AboutDlgProc re-run with the new mode. */
-static void AboutDlgApplyTheme(HWND hDlg, BOOL fDark)
+static void AboutDlgApplyTheme(HWND hDlg, const THEMESTATE* pts, BOOL fDark)
 {
     HWND hwndOK;
     BOOL fEffective;
 
-    fEffective = fDark && (0 != g_policy);
-    ThemeApplyWindow(hDlg, fDark);
+    fEffective = fDark && (0 != pts->policy);
+    ThemeApplyWindow(hDlg, pts, fDark);
     hwndOK = GetDlgItem(hDlg, IDOK);
     if (hwndOK)
     {
@@ -706,7 +711,7 @@ static void AboutDlgApplyTheme(HWND hDlg, BOOL fDark)
    NOT inline on WM_SETTINGCHANGE: the shell broadcasts the change before it has committed the new value,
    so an immediate read races and returns the old setting. ShouldAppsUseDarkMode (ordinal 132) also reads
    a cached policy snapshot -- RefreshImmersiveColorPolicyState must run first or it stays stale. */
-static void ThemeRefreshFromSystem(HWND hwnd)
+static void ThemeRefreshFromSystem(HWND hwnd, THEMESTATE* pts)
 {
     MENUBAR_PALETTE pal;
     BOOL            fNew;
@@ -715,30 +720,30 @@ static void ThemeRefreshFromSystem(HWND hwnd)
        times over ~1s. Re-running the whole retheme (frame change + menu redraw + FlushMenuThemes) on
        each duplicate is what makes the menu text flicker. Read the (registry-truth) new value and bail
        out unless it actually changed -- so exactly one repaint happens per real switch. */
-    fNew = ThemeSystemUsesDarkMode();
-    if (fNew == g_fDark)
+    fNew = ThemeSystemUsesDarkMode(pts);
+    if (fNew == pts->fDark)
     {
         return;
     }
-    g_fDark = fNew;
+    pts->fDark = fNew;
 
     (void)DlgRefreshImmersiveColorPolicyState();
     (void)DlgFlushMenuThemes();
 
-    ThemeApplyWindow(hwnd, g_fDark);
+    ThemeApplyWindow(hwnd, pts, pts->fDark);
     ThemeCommitFrame(hwnd);  /* frame change: recolors the caption AND repaints the NC menu bar + seam */
     /* Client only: coalesced invalidate (NOT RDW_UPDATENOW, which forces a synchronous extra paint each
        message). WM_ERASEBKGND picks the new brush; the frame change above already repainted the bar. */
     InvalidateRect(hwnd, NULL, TRUE);
     DrawMenuBar(hwnd);
-    MenuBarPalette(g_fDark && (0 != g_policy), &pal);
-    MenuBarPaintSeam(hwnd, &pal);
+    MenuBarPalette(pts, &pal);
+    MenuBarPaintSeam(hwnd, pts, &pal);
 
     /* The About box is modal but the theme switch still lands here (its modal loop dispatches the
        posted WMAPP_THEMECHANGED to this window) -- re-dress it too or it keeps the stale mode. */
-    if (g_hwndAbout)
+    if (pts->hwndAbout)
     {
-        AboutDlgApplyTheme(g_hwndAbout, g_fDark);
+        AboutDlgApplyTheme(pts->hwndAbout, pts, pts->fDark);
     }
 }
 
@@ -749,7 +754,9 @@ static void ThemeRefreshFromSystem(HWND hwnd)
    ThemeRefreshFromSystem, which re-dresses the dialog registered in g_hwndAbout. */
 static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-    UNREFERENCED_PARAMETER(lParam);
+    THEMESTATE* pts;
+
+    pts = (THEMESTATE*)GetWindowLongPtr(hDlg, GWLP_USERDATA);
 
     switch (uMsg)
     {
@@ -773,23 +780,32 @@ static INT_PTR CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
                            rcOwner.top + (LONG)(RECTHEIGHT(rcOwner) - RECTHEIGHT(rcDlg)) / 2,
                            0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
-        g_hwndAbout = hDlg;
-        AboutDlgApplyTheme(hDlg, g_fDark);
+        pts = (THEMESTATE*)lParam;
+        (void)SetWindowLongPtr(hDlg, GWLP_USERDATA, (LONG_PTR)pts);
+        pts->hwndAbout = hDlg;
+        AboutDlgApplyTheme(hDlg, pts, pts->fDark);
         return TRUE;
     }
 
     case WM_DESTROY:
-        g_hwndAbout = NULL;
+        if (pts)
+        {
+            pts->hwndAbout = NULL;
+        }
         break;
 
     case WM_CTLCOLORDLG:
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORBTN:
-        if (g_fDark && (0 != g_policy))
+        if (!pts)
+        {
+            break;
+        }
+        if (pts->fDark && (0 != pts->policy))
         {
             SetTextColor((HDC)wParam, DARK_TEXT);
-            SetBkColor((HDC)wParam, g_clrDarkBg);
-            return (INT_PTR)g_hbrDark;
+            SetBkColor((HDC)wParam, pts->clrDarkBg);
+            return (INT_PTR)pts->hbrDark;
         }
         /* Light: the stock dialog brush is COLOR_3DFACE, but the main window's client paints
            COLOR_WINDOW (WM_ERASEBKGND), so return that surface here to match. */
@@ -820,30 +836,46 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 {
   LRESULT lResult;
   MENUBAR_PALETTE pal;
+  THEMESTATE* pts;
 
   if (DlgDwmDefWindowProc(hwnd, uMsg, wParam, lParam, &lResult))
   {
     return lResult;
   }
 
+  if (WM_NCCREATE == uMsg)
+  {
+    pts = (THEMESTATE*)((LPCREATESTRUCT)lParam)->lpCreateParams;
+    (void)SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)pts);
+  }
+  else
+  {
+    pts = (THEMESTATE*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+  }
+
+  if (!pts)
+  {
+    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+  }
+
   switch (uMsg) {
   case WM_NCCREATE:
-    ThemeApplyWindow(hwnd, g_fDark);
+    ThemeApplyWindow(hwnd, pts, pts->fDark);
     break;
 
   case WM_UAHDRAWMENU:
     // Owner-draw the bar dark ONLY in dark mode. In light mode fall through to DefWindowProc, which
     // renders the native Win10 aero menu bar -- the canonical light look (correct aero blue hover).
-    g_fActiveItem = FALSE;  // reset on a full bar repaint; hot item (if any) re-set below
-    if (!(g_fDark && (0 != g_policy))) { break; }
-    MenuBarPalette(TRUE, &pal);
+    pts->fActiveItem = FALSE;  // reset on a full bar repaint; hot item (if any) re-set below
+    if (!(pts->fDark && (0 != pts->policy))) { break; }
+    MenuBarPalette(pts, &pal);
     MenuBarOnDrawMenu(hwnd, (const UAHMENU*)lParam, &pal);
     return TRUE;
 
   case WM_UAHDRAWMENUITEM:
-    if (g_fDark && (0 != g_policy))
+    if (pts->fDark && (0 != pts->policy))
     {
-      MenuBarPalette(TRUE, &pal);
+      MenuBarPalette(pts, &pal);
       MenuBarOnDrawMenuItem(hwnd, (const UAHDRAWMENUITEM*)lParam, &pal);
       return TRUE;
     }
@@ -853,12 +885,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
       const UAHDRAWMENUITEM* pmi = (const UAHDRAWMENUITEM*)lParam;
       if (pmi->dis.itemState & (ODS_HOTLIGHT | ODS_SELECTED))
       {
-        g_rcActiveItem = pmi->dis.rcItem;
-        g_fActiveItem  = TRUE;
+        pts->rcActiveItem = pmi->dis.rcItem;
+        pts->fActiveItem  = TRUE;
       }
-      else if (g_fActiveItem && EqualRect(&g_rcActiveItem, &pmi->dis.rcItem))
+      else if (pts->fActiveItem && EqualRect(&pts->rcActiveItem, &pmi->dis.rcItem))
       {
-        g_fActiveItem = FALSE;  // this item just went back to normal (hover-out)
+        pts->fActiveItem = FALSE;  // this item just went back to normal (hover-out)
       }
     }
     break;
@@ -869,15 +901,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     // and the client -- in BOTH themes, using the current bar color (dark fill in dark mode,
     // COLOR_WINDOW in light mode) -- so no line shows in either theme.
     lResult = DefWindowProc(hwnd, uMsg, wParam, lParam);
-    MenuBarPalette(g_fDark && (0 != g_policy), &pal);
-    MenuBarPaintSeam(hwnd, &pal);
+    MenuBarPalette(pts, &pal);
+    MenuBarPaintSeam(hwnd, pts, &pal);
     return lResult;
 
   case WM_ERASEBKGND:
   {
     RECT rc;
     GetClientRect(hwnd, &rc);
-    FillRect((HDC)wParam, &rc, g_fDark ? g_hbrDark : GetSysColorBrush(COLOR_WINDOW));
+    FillRect((HDC)wParam, &rc, pts->fDark ? pts->hbrDark : GetSysColorBrush(COLOR_WINDOW));
     return 1;
   }
 
@@ -887,9 +919,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     // the TCHAR-mapped lstrcmpi/TEXT() (NOT lstrcmpiW/L"...", which would read the ANSI bytes as wide
     // and never match, silently dropping every theme change). Defer the re-read (coalesced) to the
     // next loop turn so it runs after the broadcast returns.
-    if (lParam && (0 == lstrcmpi((LPCTSTR)lParam, TEXT("ImmersiveColorSet"))) && !g_fThemeChangePending)
+    if (lParam && (0 == lstrcmpi((LPCTSTR)lParam, TEXT("ImmersiveColorSet"))) && !pts->fThemeChangePending)
     {
-      g_fThemeChangePending = TRUE;
+      pts->fThemeChangePending = TRUE;
       PostMessage(hwnd, WMAPP_THEMECHANGED, 0, 0);
     }
     break;
@@ -899,8 +931,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
   // redundant menu repaints -> flicker. The single ImmersiveColorSet path below drives the retheme.
 
   case WMAPP_THEMECHANGED:
-    g_fThemeChangePending = FALSE;
-    ThemeRefreshFromSystem(hwnd);
+    pts->fThemeChangePending = FALSE;
+    ThemeRefreshFromSystem(hwnd, pts);
     return 0;
 
   case WM_COMMAND:
@@ -909,7 +941,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
       DestroyWindow(hwnd);
       return 0;
     case IDM_ABOUT:
-      DialogBox((HINSTANCE)&__ImageBase, MAKEINTRESOURCE(IDD_ABOUTBOX), hwnd, AboutDlgProc);
+      DialogBoxParam((HINSTANCE)&__ImageBase, MAKEINTRESOURCE(IDD_ABOUTBOX), hwnd, AboutDlgProc, (LPARAM)pts);
       return 0;
     default:
       break;
